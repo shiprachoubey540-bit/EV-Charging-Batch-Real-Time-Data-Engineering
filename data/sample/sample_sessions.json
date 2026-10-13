@@ -1,0 +1,156 @@
+{
+  "_meta":
+    {
+      "end": "Tue, 31 Dec 2024 16:19:00 GMT",
+      "min_kWh": null,
+      "site": "caltech",
+      "start": "Tue, 01 Jan 2019 16:18:00 GMT"
+    },
+  "_items": [
+    {
+      "_id": "aaa000000000000000000001",
+      "clusterID": "0039",
+      "connectionTime": "Tue, 01 Jan 2019 17:41:45 GMT",
+      "disconnectTime": "Tue, 01 Jan 2019 21:00:00 GMT",
+      "doneChargingTime": "Tue, 01 Jan 2019 19:30:00 GMT",
+      "kWhDelivered": 10.5,
+      "sessionID": "2_39_100_001_2019-01-01 17:41:45.000000",
+      "siteID": "0002",
+      "spaceID": "CA-100",
+      "stationID": "2-39-100-001",
+      "timezone": "America/Los_Angeles",
+      "userID": "000000101",
+      "userInputs": [
+        {
+          "WhPerMile": 250,
+          "kWhRequested": 20.0,
+          "milesRequested": 80,
+          "minutesAvailable": 200,
+          "modifiedAt": "Tue, 01 Jan 2019 17:42:00 GMT",
+          "paymentRequired": true,
+          "requestedDeparture": "Tue, 01 Jan 2019 21:00:00 GMT",
+          "userID": 101
+        }
+      ]
+    },
+    {
+      "_id": "aaa000000000000000000002",
+      "clusterID": "0039",
+      "connectionTime": "Wed, 02 Jan 2019 08:00:00 GMT",
+      "disconnectTime": "Wed, 02 Jan 2019 17:30:00 GMT",
+      "doneChargingTime": "Wed, 02 Jan 2019 12:15:00 GMT",
+      "kWhDelivered": 25.123,
+      "sessionID": "2_39_100_002_2019-01-02 08:00:00.000000",
+      "siteID": "0002",
+      "spaceID": "CA-200",
+      "stationID": "2-39-100-002",
+      "timezone": "America/Los_Angeles",
+      "userID": "000000202",
+      "userInputs": [
+        {
+          "WhPerMile": 300,
+          "kWhRequested": 30.0,
+          "milesRequested": 100,
+          "minutesAvailable": 570,
+          "modifiedAt": "Wed, 02 Jan 2019 08:00:30 GMT",
+          "paymentRequired": false,
+          "requestedDeparture": "Wed, 02 Jan 2019 17:30:00 GMT",
+          "userID": 202
+        }
+      ]
+    },
+    {
+      "_id": "aaa000000000000000000003",
+      "clusterID": "0039",
+      "connectionTime": "Thu, 03 Jan 2019 10:00:00 GMT",
+      "disconnectTime": "Thu, 03 Jan 2019 14:00:00 GMT",
+      "doneChargingTime": null,
+      "kWhDelivered": 3.2,
+      "sessionID": "2_39_100_003_2019-01-03 10:00:00.000000",
+      "siteID": "0002",
+      "spaceID": "CA-300",
+      "stationID": "2-39-100-003",
+      "timezone": "America/Los_Angeles",
+      "userID": "000000303",
+      "userInputs": [
+        {
+          "WhPerMile": 200,
+          "kWhRequested": 10.0,
+          "milesRequested": 50,
+          "minutesAvailable": 240,
+          "modifiedAt": "Thu, 03 Jan 2019 10:01:00 GMT",
+          "paymentRequired": true,
+          "requestedDeparture": "Thu, 03 Jan 2019 14:00:00 GMT",
+          "userID": 303
+        }
+      ]
+    },
+    {
+      "_id": "aaa000000000000000000004",
+      "clusterID": "0039",
+      "connectionTime": "Fri, 04 Jan 2019 12:00:00 GMT",
+      "disconnectTime": "Fri, 04 Jan 2019 15:00:00 GMT",
+      "doneChargingTime": "Fri, 04 Jan 2019 13:00:00 GMT",
+      "kWhDelivered": 5.0,
+      "sessionID": "2_39_100_004_2019-01-04 12:00:00.000000",
+      "siteID": "0002",
+      "spaceID": "CA-400",
+      "stationID": "2-39-100-004",
+      "timezone": "America/Los_Angeles",
+      "userID": null,
+      "userInputs": null
+    },
+    {
+      "_id": "aaa000000000000000000005",
+      "clusterID": "0039",
+      "connectionTime": "Sat, 05 Jan 2019 09:00:00 GMT",
+      "disconnectTime": "Sat, 05 Jan 2019 11:00:00 GMT",
+      "doneChargingTime": "Sat, 05 Jan 2019 12:00:00 GMT",
+      "kWhDelivered": 8.75,
+      "sessionID": "2_39_100_005_2019-01-05 09:00:00.000000",
+      "siteID": "0002",
+      "spaceID": "CA-500",
+      "stationID": "2-39-100-005",
+      "timezone": "America/Los_Angeles",
+      "userID": "000000505",
+      "userInputs": [
+        {
+          "WhPerMile": 350,
+          "kWhRequested": 15.0,
+          "milesRequested": 42,
+          "minutesAvailable": 120,
+          "modifiedAt": "Sat, 05 Jan 2019 09:01:00 GMT",
+          "paymentRequired": true,
+          "requestedDeparture": "Sat, 05 Jan 2019 11:00:00 GMT",
+          "userID": 505
+        }
+      ]
+    },
+    {
+      "_id": "aaa000000000000000000006",
+      "clusterID": "0039",
+      "connectionTime": "Sun, 06 Jan 2019 14:00:00 GMT",
+      "disconnectTime": "Sun, 06 Jan 2019 18:00:00 GMT",
+      "doneChargingTime": "Sun, 06 Jan 2019 16:30:00 GMT",
+      "kWhDelivered": 12.0,
+      "sessionID": "2_39_100_006_2019-01-06 14:00:00.000000",
+      "siteID": "0002",
+      "spaceID": "CA-100",
+      "stationID": "2-39-100-001",
+      "timezone": "America/Los_Angeles",
+      "userID": "000000101",
+      "userInputs": [
+        {
+          "WhPerMile": 250,
+          "kWhRequested": 18.0,
+          "milesRequested": 72,
+          "minutesAvailable": 240,
+          "modifiedAt": "Sun, 06 Jan 2019 14:00:30 GMT",
+          "paymentRequired": true,
+          "requestedDeparture": "Sun, 06 Jan 2019 18:00:00 GMT",
+          "userID": 101
+        }
+      ]
+    }
+  ]
+}

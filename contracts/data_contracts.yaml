@@ -1,37 +1,211 @@
-﻿# ============================================================
+# ============================================================
 # Shared Data Contracts
 # All modules MUST conform to these schemas.
 #
-# Field names are provisional placeholders. They will be updated
-# after inspecting the actual ACN-Data dataset.
+# Updated after inspecting the ACN-Data dataset (acndata_sessions.json).
+# Source: Caltech ACN-Data API — site "caltech", Jan–Mar 2019.
 # ============================================================
 
 # --- Historical Session Record (Batch Path) ---
-# Source: ACN-Data CSV → ingestion/ → processing/ → database/
+# Source: ACN-Data JSON → ingestion/ → processing/ → database/
 session_record:
   description: >
     A single EV charging session from the ACN-Data historical dataset.
-    Field names below are placeholders and will be replaced with actual
-    ACN-Data column names after dataset inspection.
+    Produced by the ingestion module (ingestion/transform.py) and
+    consumed by the Spark processing module and PostgreSQL loader.
+  source_fields:
+    # Fields mapped directly from the ACN-Data JSON
+    - name: _id
+      target: id
+      type: string (VARCHAR 24)
+      required: true
+      description: MongoDB ObjectId string from ACN-Data. Primary key.
+
+    - name: sessionID
+      target: session_id
+      type: string (VARCHAR 64)
+      required: true
+      description: >
+        ACN-Data session identifier.
+        Format: "{stationID}_{date} {time}" with underscores.
+        Unique across all records.
+
+    - name: siteID
+      target: site_id
+      type: string (VARCHAR 10)
+      required: true
+      description: Site identifier (e.g., "0002" for Caltech).
+
+    - name: clusterID
+      target: cluster_id
+      type: string (VARCHAR 10)
+      required: true
+      description: Cluster identifier within the site.
+
+    - name: stationID
+      target: station_id
+      type: string (VARCHAR 20)
+      required: true
+      description: >
+        Charging station identifier (e.g., "2-39-138-566").
+        53 unique stations in the current dataset.
+
+    - name: spaceID
+      target: space_id
+      type: string (VARCHAR 10)
+      required: true
+      description: >
+        Parking space label (e.g., "CA-512").
+        1-to-1 mapping with stationID.
+
+    - name: connectionTime
+      target: connection_time
+      type: timestamp with time zone
+      required: true
+      description: >
+        When the vehicle was plugged in. Source format: RFC 2822 (GMT).
+        Converted to ISO 8601 UTC by the ETL.
+
+    - name: disconnectTime
+      target: disconnect_time
+      type: timestamp with time zone
+      required: true
+      description: >
+        When the vehicle was unplugged. Source format: RFC 2822 (GMT).
+        Converted to ISO 8601 UTC by the ETL.
+
+    - name: doneChargingTime
+      target: done_charging_time
+      type: timestamp with time zone
+      required: false
+      description: >
+        Timestamp of the last non-zero charging rate.
+        Null in ~0.2% of records (vehicle disconnected before
+        charging completed). May be after disconnectTime in ~2.4%
+        of records (flagged as anomaly).
+
+    - name: kWhDelivered
+      target: kwh_delivered
+      type: float (DOUBLE PRECISION)
+      required: true
+      description: >
+        Total energy delivered during the session, in kWh.
+        Range: 0.502–75.528 in current dataset.
+
+    - name: userID
+      target: user_id
+      type: string (VARCHAR 12)
+      required: false
+      description: >
+        Zero-padded user identifier (e.g., "000000558").
+        Null in ~12.3% of records (anonymous sessions).
+
+    - name: timezone
+      target: timezone
+      type: string (VARCHAR 30)
+      required: true
+      description: >
+        IANA timezone of the site (e.g., "America/Los_Angeles").
+        All records use the same timezone in current dataset.
+
+  computed_fields:
+    # Fields computed by the ETL (not in source JSON)
+    - name: session_duration_min
+      type: float (DOUBLE PRECISION)
+      required: true
+      description: >
+        (disconnect_time - connection_time) in minutes.
+
+    - name: charging_duration_min
+      type: float (DOUBLE PRECISION)
+      required: false
+      description: >
+        (done_charging_time - connection_time) in minutes.
+        Null when done_charging_time is null.
+
+    - name: idle_duration_min
+      type: float (DOUBLE PRECISION)
+      required: false
+      description: >
+        (disconnect_time - done_charging_time) in minutes.
+        Null when done_charging_time is null.
+        May be negative when done_charging_time > disconnect_time.
+
+    - name: validation_flags
+      type: string (TEXT)
+      required: false
+      description: >
+        Comma-separated validation flags. Null if record is clean.
+        Possible flags: done_after_disconnect,
+        connection_after_disconnect, missing_required_field:{field},
+        kwh_delivered_negative, null_done_charging_time_with_energy.
+
+    - name: ingestion_timestamp
+      type: timestamp with time zone
+      required: true
+      description: UTC timestamp of when the ETL processed this record.
+
+# --- User Input Record (normalised from userInputs nested array) ---
+session_user_input:
+  description: >
+    User-submitted charging preferences from the ACN-Data adaptive
+    charging interface. One-to-many relationship with session_record.
+    Null/absent for ~12.3% of sessions (anonymous users).
   fields:
     - name: session_id
-      type: string
+      type: string (VARCHAR 64)
       required: true
-      description: Unique identifier for the charging session.
+      description: FK → session_record.session_id.
 
-    - name: station_id
-      type: string
+    - name: wh_per_mile
+      type: integer
       required: true
-      description: Identifier of the charging station.
+      source: userInputs[*].WhPerMile
+      description: Vehicle energy consumption in Wh per mile.
 
-    # TODO: Add remaining fields after examining the ACN-Data CSV
-    # Likely candidates include:
-    #   - connection_time (timestamp)
-    #   - done_charging_time (timestamp)
-    #   - disconnect_time (timestamp)
-    #   - kwh_delivered (float)
-    #   - user_id (string)
-    #   - site_id (string)
+    - name: kwh_requested
+      type: float (DOUBLE PRECISION)
+      required: true
+      source: userInputs[*].kWhRequested
+      description: Energy requested by the user, in kWh.
+
+    - name: miles_requested
+      type: integer
+      required: true
+      source: userInputs[*].milesRequested
+      description: Miles of range requested by the user.
+
+    - name: minutes_available
+      type: integer
+      required: true
+      source: userInputs[*].minutesAvailable
+      description: Minutes the user expects to remain connected.
+
+    - name: modified_at
+      type: timestamp with time zone
+      required: true
+      source: userInputs[*].modifiedAt
+      description: When the user submitted or modified this input.
+
+    - name: payment_required
+      type: boolean
+      required: true
+      source: userInputs[*].paymentRequired
+      description: Whether the session requires payment.
+
+    - name: requested_departure
+      type: timestamp with time zone
+      required: true
+      source: userInputs[*].requestedDeparture
+      description: User-requested departure time.
+
+    - name: user_id_numeric
+      type: integer
+      required: true
+      source: userInputs[*].userID
+      description: >
+        Integer form of the user ID. Corresponds to the top-level
+        userID after stripping leading zeros (e.g., 558 ↔ "000000558").
 
 # --- Streaming Event Record (Stream Path) ---
 # Source: event_generator → Kafka → processing/ → database/
@@ -72,7 +246,15 @@ database_tables:
   charging_sessions:
     source: session_record
     description: Stores batch-loaded historical sessions.
-    primary_key: session_id
+    primary_key: id
+    unique_constraints: [session_id]
+
+  session_user_inputs:
+    source: session_user_input
+    description: Normalised user input entries linked to sessions.
+    primary_key: id (SERIAL)
+    foreign_keys:
+      session_id: charging_sessions.session_id
 
   charging_events:
     source: streaming_event
