@@ -1,0 +1,31 @@
+﻿# ============================================================
+# Example Configuration — copy and adapt for your environment.
+# Do NOT store secrets here. Use .env for credentials.
+# ============================================================
+
+pipeline:
+  name: ev-charging-pipeline
+  batch_schedule: daily
+  streaming_enabled: true
+
+kafka:
+  bootstrap_servers: localhost:9092
+  topic: charging-events
+  consumer_group: ev-processing-group
+
+spark:
+  master: "local[*]"
+  app_name: ev-charging-pipeline
+  checkpoint_dir: ./spark-checkpoints
+
+database:
+  host: localhost
+  port: 5432
+  name: ev_charging
+  schema: public
+
+airflow:
+  dags_folder: ./orchestration/dags
+
+dashboard:
+  port: 8501

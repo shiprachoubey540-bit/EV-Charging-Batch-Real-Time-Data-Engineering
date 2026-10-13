@@ -1,0 +1,80 @@
+﻿# ============================================================
+# Shared Data Contracts
+# All modules MUST conform to these schemas.
+#
+# Field names are provisional placeholders. They will be updated
+# after inspecting the actual ACN-Data dataset.
+# ============================================================
+
+# --- Historical Session Record (Batch Path) ---
+# Source: ACN-Data CSV → ingestion/ → processing/ → database/
+session_record:
+  description: >
+    A single EV charging session from the ACN-Data historical dataset.
+    Field names below are placeholders and will be replaced with actual
+    ACN-Data column names after dataset inspection.
+  fields:
+    - name: session_id
+      type: string
+      required: true
+      description: Unique identifier for the charging session.
+
+    - name: station_id
+      type: string
+      required: true
+      description: Identifier of the charging station.
+
+    # TODO: Add remaining fields after examining the ACN-Data CSV
+    # Likely candidates include:
+    #   - connection_time (timestamp)
+    #   - done_charging_time (timestamp)
+    #   - disconnect_time (timestamp)
+    #   - kwh_delivered (float)
+    #   - user_id (string)
+    #   - site_id (string)
+
+# --- Streaming Event Record (Stream Path) ---
+# Source: event_generator → Kafka → processing/ → database/
+streaming_event:
+  description: >
+    A simulated real-time charging event produced by the event generator
+    and published to Kafka.
+  fields:
+    - name: event_id
+      type: string
+      required: true
+      description: Unique event identifier (e.g., evt-123456).
+
+    - name: station_id
+      type: string
+      required: true
+      description: Identifier of the charging station.
+
+    - name: event_type
+      type: string
+      required: true
+      enum: [session_start, session_end, energy_update]
+      description: Type of charging event.
+
+    - name: timestamp
+      type: string
+      format: ISO 8601
+      required: true
+      description: Event timestamp in UTC.
+
+    - name: energy_kwh
+      type: float
+      required: false
+      description: Cumulative energy delivered so far (kWh).
+
+# --- Database Table Mappings ---
+database_tables:
+  charging_sessions:
+    source: session_record
+    description: Stores batch-loaded historical sessions.
+    primary_key: session_id
+
+  charging_events:
+    source: streaming_event
+    description: Stores stream-loaded real-time events.
+    primary_key: event_id

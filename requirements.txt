@@ -1,0 +1,35 @@
+﻿# ============================================================
+# EV Charging Pipeline — Python Dependencies
+# Install: pip install -r requirements.txt
+# ============================================================
+
+# -------------------- Core --------------------
+python-dotenv>=1.0.0
+
+# -------------------- Data Processing --------------------
+pandas>=2.0.0
+numpy>=1.24.0
+
+# -------------------- Apache Kafka --------------------
+confluent-kafka>=2.3.0
+
+# -------------------- Apache Spark --------------------
+pyspark>=3.5.0
+
+# -------------------- PostgreSQL --------------------
+psycopg2-binary>=2.9.9
+sqlalchemy>=2.0.0
+
+# -------------------- Apache Airflow (install separately or via Docker) --------------------
+# apache-airflow>=2.8.0
+
+# -------------------- Streamlit Dashboard --------------------
+streamlit>=1.30.0
+plotly>=5.18.0
+
+# -------------------- Testing --------------------
+pytest>=8.0.0
+pytest-cov>=4.1.0
+
+# -------------------- Code Quality --------------------
+ruff>=0.3.0

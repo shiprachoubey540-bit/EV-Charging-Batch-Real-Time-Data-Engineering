@@ -1,0 +1,88 @@
+﻿# ============================================================
+# EV-Charging-Batch-Real-Time-Data-Engineering .gitignore
+# ============================================================
+
+# -------------------- Python --------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
+
+# -------------------- Virtual Environments --------------------
+.venv/
+venv/
+ENV/
+env/
+
+# -------------------- Environment & Secrets --------------------
+.env
+.env.local
+.env.production
+*.pem
+*.key
+secrets/
+
+# -------------------- Raw Data (large files) --------------------
+data/raw/*
+!data/raw/.gitkeep
+
+# -------------------- IDE & Editors --------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# -------------------- OS Files --------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# -------------------- Jupyter Notebooks --------------------
+.ipynb_checkpoints/
+
+# -------------------- Spark --------------------
+spark-warehouse/
+metastore_db/
+derby.log
+
+# -------------------- Airflow --------------------
+airflow.db
+airflow.cfg
+airflow-webserver.pid
+logs/
+
+# -------------------- Docker --------------------
+docker-compose.override.yml
+.docker/
+
+# -------------------- Coverage & Testing --------------------
+htmlcov/
+.coverage
+.coverage.*
+.pytest_cache/
+.tox/
+nosetests.xml
+coverage.xml
+*.cover
+
+# -------------------- Distribution / Packaging --------------------
+*.tar.gz
+*.whl
+
+# -------------------- MyPy --------------------
+.mypy_cache/
+.dmypy.json
+dmypy.json
