@@ -20,6 +20,9 @@ import sys
 import time
 from pathlib import Path
 
+# Ensure the project root is on sys.path when running as a script
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from ingestion.extract import extract_sessions
 from ingestion.validate import validate_sessions
 from ingestion.transform import transform_sessions
@@ -48,13 +51,17 @@ def _setup_logging(log_dir: Path) -> None:
 
     root_logger = logging.getLogger("ingestion")
     root_logger.setLevel(logging.DEBUG)
-    root_logger.addHandler(console_handler)
-    root_logger.addHandler(file_handler)
+    # Avoid duplicate handlers if called repeatedly
+    if not root_logger.handlers:
+        root_logger.addHandler(console_handler)
+        root_logger.addHandler(file_handler)
 
 
 def run_pipeline(
     source_path: str | None = None,
     output_dir: str | None = None,
+    allow_recovery: bool = True,
+    execution_time: str | None = None,
 ) -> dict:
     """
     Run the full ETL pipeline.
@@ -65,12 +72,20 @@ def run_pipeline(
         Path to the source JSON file.
     output_dir : str | None
         Override output directory (defaults to ``data/processed/``).
+    allow_recovery : bool
+        If True, allows in-memory recovery of truncated files while tagging
+        the dataset status as incomplete. If False, strict parsing error raises.
+    execution_time : str | None
+        Optional fixed execution timestamp for deterministic pipeline runs.
 
     Returns
     -------
     dict
         Pipeline results including timing and output summary.
     """
+    out_dir = Path(output_dir or "./data/processed").resolve()
+    _setup_logging(out_dir)
+
     pipeline_start = time.time()
     results: dict = {"stages": {}}
 
@@ -79,9 +94,12 @@ def run_pipeline(
     logger.info("STAGE 1/4: EXTRACT")
     logger.info("=" * 60)
     t0 = time.time()
-    sessions, metadata = extract_sessions(source_path)
+    sessions, metadata = extract_sessions(source_path, allow_recovery=allow_recovery)
+    ext_status = metadata.get("_extraction_status", {})
     results["stages"]["extract"] = {
         "records": len(sessions),
+        "status": ext_status.get("status", "UNKNOWN"),
+        "is_complete": ext_status.get("is_complete", False),
         "elapsed_sec": round(time.time() - t0, 3),
     }
 
@@ -101,7 +119,7 @@ def run_pipeline(
     logger.info("STAGE 3/4: TRANSFORM")
     logger.info("=" * 60)
     t0 = time.time()
-    sessions_df, user_inputs_df = transform_sessions(validated)
+    sessions_df, user_inputs_df = transform_sessions(validated, execution_time=execution_time)
     results["stages"]["transform"] = {
         "session_rows": len(sessions_df),
         "user_input_rows": len(user_inputs_df),
@@ -114,7 +132,7 @@ def run_pipeline(
     logger.info("=" * 60)
     t0 = time.time()
     load_results = load_sessions(
-        sessions_df, user_inputs_df, validation_summary, metadata, output_dir
+        sessions_df, user_inputs_df, validation_summary, metadata, str(out_dir)
     )
     results["stages"]["load"] = {
         "output": load_results,
@@ -124,13 +142,16 @@ def run_pipeline(
     # ---- SUMMARY ----
     total_elapsed = round(time.time() - pipeline_start, 3)
     results["total_elapsed_sec"] = total_elapsed
+    results["completeness_status"] = ext_status.get("status", "UNKNOWN")
 
     logger.info("=" * 60)
     logger.info("PIPELINE COMPLETE")
     logger.info("=" * 60)
+    logger.info("Status:             %s", ext_status.get("status", "UNKNOWN"))
     logger.info("Total records:      %d", len(sessions_df))
     logger.info("User input records: %d", len(user_inputs_df))
     logger.info("Flagged records:    %d", validation_summary.get("flagged_records", 0))
+    logger.info("Duplicate records:  %d", validation_summary.get("duplicate_records", 0))
     logger.info("Total time:         %.3f sec", total_elapsed)
     logger.info("Output directory:   %s", load_results.get("output_dir", "N/A"))
 
@@ -154,13 +175,22 @@ def main() -> None:
         default=None,
         help="Output directory (default: data/processed/)",
     )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Strict mode: fail immediately if JSON is malformed without attempting recovery.",
+    )
     args = parser.parse_args()
 
     output_dir = args.output_dir or "./data/processed"
     _setup_logging(Path(output_dir))
 
     try:
-        results = run_pipeline(args.source, output_dir)
+        results = run_pipeline(
+            source_path=args.source,
+            output_dir=output_dir,
+            allow_recovery=not args.strict,
+        )
         logger.info("Pipeline results:\n%s", json.dumps(results, indent=2, default=str))
     except Exception:
         logger.exception("Pipeline failed with an unhandled error")
