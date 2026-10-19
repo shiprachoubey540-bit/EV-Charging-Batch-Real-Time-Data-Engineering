@@ -112,33 +112,49 @@ session_record:
     # Fields computed by the ETL (not in source JSON)
     - name: session_duration_min
       type: float (DOUBLE PRECISION)
-      required: true
+      required: false
       description: >
         (disconnect_time - connection_time) in minutes.
+        Null when connection_time > disconnect_time (flagged).
 
     - name: charging_duration_min
       type: float (DOUBLE PRECISION)
       required: false
       description: >
         (done_charging_time - connection_time) in minutes.
-        Null when done_charging_time is null.
+        Null when done_charging_time is null or when
+        done_charging_time > disconnect_time (flagged).
 
     - name: idle_duration_min
       type: float (DOUBLE PRECISION)
       required: false
       description: >
         (disconnect_time - done_charging_time) in minutes.
-        Null when done_charging_time is null.
-        May be negative when done_charging_time > disconnect_time.
+        Null when done_charging_time is null or when
+        done_charging_time > disconnect_time (flagged with
+        done_after_disconnect). Never negative; null prevents
+        metric contamination in downstream aggregations.
 
     - name: validation_flags
       type: string (TEXT)
       required: false
       description: >
         Comma-separated validation flags. Null if record is clean.
-        Possible flags: done_after_disconnect,
-        connection_after_disconnect, missing_required_field:{field},
-        kwh_delivered_negative, null_done_charging_time_with_energy.
+        Possible flags:
+          - duplicate_record_id: duplicate MongoDB _id detected
+          - duplicate_session_id: duplicate business sessionID detected
+          - done_after_disconnect: doneChargingTime > disconnectTime
+          - done_after_disconnect_outlier: doneChargingTime > disconnectTime by > 60s
+          - connection_after_disconnect: connectionTime > disconnectTime
+          - missing_required_field:{field}: required field is null or empty string
+          - kwh_delivered_negative: kWhDelivered < 0
+          - kwh_delivered_not_numeric: kWhDelivered not float/int
+          - null_done_charging_time_with_energy: doneChargingTime null but energy > 0
+          - malformed_user_inputs: userInputs not a list
+          - malformed_user_input_entry: entry in userInputs not a dict
+          - user_input_negative:{field}: negative value in userInputs numeric field
+          - user_input_not_numeric:{field}: non-numeric value in userInputs numeric field
+          - user_input_unparseable_timestamp:{field}: invalid timestamp in userInputs
 
     - name: ingestion_timestamp
       type: timestamp with time zone
@@ -211,35 +227,78 @@ session_user_input:
 # Source: event_generator → Kafka → processing/ → database/
 streaming_event:
   description: >
-    A simulated real-time charging event produced by the event generator
-    and published to Kafka.
+    A simulated real-time charging telemetry event produced by the event
+    generator and published to Kafka topic 'charging-events'. Consumed
+    by Spark Structured Streaming and persisted to PostgreSQL.
+  entity_relationships:
+    station_id: Hardware charging port/EVSE. 1 station has <= 1 active session.
+    session_id: Unique charging session from plug-in to plug-out. Correlates all events for a session.
+    event_id: Unique UUID per telemetry packet. Multiple events share the same session_id and station_id.
+    event_type: State machine transition (session_start -> energy_update -> session_end).
+  deduplication_policy: >
+    Kafka provides at-least-once delivery; duplicate events may occur due to producer
+    retries or consumer rebalancing. Downstream Spark Structured Streaming MUST
+    deduplicate on 'event_id' using a watermarked stream:
+    events_df.withWatermark("timestamp", "10 minutes").dropDuplicates(["event_id"]).
+    The database table charging_events enforces PRIMARY KEY (event_id).
   fields:
     - name: event_id
-      type: string
+      type: string (VARCHAR 64)
       required: true
-      description: Unique event identifier (e.g., evt-123456).
+      description: >
+        Unique event identifier formatted as UUID4 string (e.g., 'evt-74b89f2a-8101-49b9-9d95-8b87201c1f51').
+        Guarantees zero collision probability across streaming partitions.
 
     - name: station_id
-      type: string
+      type: string (VARCHAR 20)
       required: true
-      description: Identifier of the charging station.
+      description: >
+        Identifier of the hardware charging station (e.g., '2-39-81-4550').
+        Must match one of the 55 verified Caltech station identifiers
+        documented in data/processed/validation/station_summary.csv.
+
+    - name: session_id
+      type: string (VARCHAR 64)
+      required: true
+      description: >
+        Identifier of the active charging session. Links telemetry events
+        (session_start, energy_update, session_end) belonging to the same physical
+        charging cycle. Corresponds to historical batch session_id format.
 
     - name: event_type
-      type: string
+      type: string (VARCHAR 20)
       required: true
       enum: [session_start, session_end, energy_update]
-      description: Type of charging event.
+      description: >
+        Type/lifecycle state of charging telemetry:
+          - session_start: Vehicle connected/charging initiated (energy_kwh = 0.0).
+          - energy_update: Periodic heartbeat telemetry during charging.
+          - session_end: Vehicle unplugged/charging finished (final energy_kwh).
 
     - name: timestamp
-      type: string
-      format: ISO 8601
+      type: timestamp with time zone
+      format: ISO 8601 (UTC)
       required: true
-      description: Event timestamp in UTC.
+      description: >
+        Event emission timestamp in UTC formatted as ISO 8601 string
+        (e.g., '2026-10-19T18:00:00+00:00' or '2026-10-19T18:00:00Z').
 
     - name: energy_kwh
-      type: float
+      type: float (DOUBLE PRECISION)
+      required: true
+      description: >
+        Cumulative metered energy delivered since the start of the current
+        session (kWh). Semantics: strictly non-negative (>= 0.0) and
+        monotonically non-decreasing across consecutive events of a session.
+        Exactly 0.0 at session_start. Final total at session_end.
+
+    - name: incremental_kwh
+      type: float (DOUBLE PRECISION)
       required: false
-      description: Cumulative energy delivered so far (kWh).
+      description: >
+        Incremental energy delivered during the immediate reporting interval
+        (delta between current event and previous event). Non-negative (>= 0.0).
+        0.0 at session_start. The sum of incremental_kwh equals cumulative energy_kwh.
 
 # --- Database Table Mappings ---
 database_tables:

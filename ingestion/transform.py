@@ -55,6 +55,7 @@ def _duration_minutes(start_iso: str | None, end_iso: str | None) -> float | Non
 
 def transform_sessions(
     sessions: list[dict],
+    execution_time: str | datetime | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Transform raw session records into the canonical output schema.
@@ -63,6 +64,9 @@ def transform_sessions(
     ----------
     sessions : list[dict]
         Validated session records (each may contain ``_validation_flags``).
+    execution_time : str | datetime | None
+        Optional fixed execution timestamp for deterministic pipeline runs.
+        Defaults to current UTC time.
 
     Returns
     -------
@@ -71,7 +75,13 @@ def transform_sessions(
         - **user_inputs_df** — Normalised user inputs table (one row per
           user-input entry, linked by ``session_id``).
     """
-    ingestion_ts = datetime.now(timezone.utc).isoformat()
+    if execution_time is None:
+        ingestion_ts = datetime.now(timezone.utc).isoformat()
+    elif isinstance(execution_time, datetime):
+        ingestion_ts = execution_time.astimezone(timezone.utc).isoformat()
+    else:
+        ingestion_ts = str(execution_time)
+
     transformed_rows: list[dict] = []
     user_input_rows: list[dict] = []
 
@@ -81,28 +91,59 @@ def transform_sessions(
         disc_iso = _rfc2822_to_iso(rec.get("disconnectTime"))
         done_iso = _rfc2822_to_iso(rec.get("doneChargingTime"))
 
-        # --- Compute durations ---
-        session_dur = _duration_minutes(conn_iso, disc_iso)
-        charging_dur = _duration_minutes(conn_iso, done_iso)
-        idle_dur = _duration_minutes(done_iso, disc_iso)
+        # --- Compute durations safely ---
+        session_dur = None
+        if conn_iso and disc_iso:
+            dur = _duration_minutes(conn_iso, disc_iso)
+            if dur is not None and dur >= 0:
+                session_dur = dur
+
+        # Check if doneChargingTime occurs after disconnectTime
+        done_after_disc = False
+        if disc_iso and done_iso:
+            try:
+                dt_disc = datetime.fromisoformat(disc_iso)
+                dt_done = datetime.fromisoformat(done_iso)
+                if dt_done > dt_disc:
+                    done_after_disc = True
+            except Exception:
+                pass
+
+        charging_dur = None
+        idle_dur = None
+
+        if not done_after_disc:
+            # Durations are only reliable when doneChargingTime <= disconnectTime
+            if conn_iso and done_iso:
+                c_dur = _duration_minutes(conn_iso, done_iso)
+                if c_dur is not None and c_dur >= 0:
+                    charging_dur = c_dur
+
+            if done_iso and disc_iso:
+                i_dur = _duration_minutes(done_iso, disc_iso)
+                if i_dur is not None and i_dur >= 0:
+                    idle_dur = i_dur
+        # When done_after_disc is True:
+        # idle_duration_min and charging_duration_min are set to None (null)
+        # to prevent negative idle duration from contaminating analytical aggregations.
 
         # --- Validation flags ---
         flags = rec.get("_validation_flags", [])
         flags_str = ",".join(flags) if flags else None
 
         row = {
-            "id": rec.get("_id"),
-            "session_id": rec.get("sessionID"),
-            "site_id": rec.get("siteID"),
-            "cluster_id": rec.get("clusterID"),
-            "station_id": rec.get("stationID"),
-            "space_id": rec.get("spaceID"),
+            "id": str(rec["_id"]) if rec.get("_id") is not None else None,
+            "session_id": str(rec["sessionID"]) if rec.get("sessionID") is not None else None,
+            "site_id": str(rec["siteID"]) if rec.get("siteID") is not None else None,
+            "cluster_id": str(rec["clusterID"]) if rec.get("clusterID") is not None else None,
+            "station_id": str(rec["stationID"]) if rec.get("stationID") is not None else None,
+            "space_id": str(rec["spaceID"]) if rec.get("spaceID") is not None else None,
             "connection_time": conn_iso,
             "disconnect_time": disc_iso,
             "done_charging_time": done_iso,
-            "kwh_delivered": rec.get("kWhDelivered"),
-            "user_id": rec.get("userID"),
-            "timezone": rec.get("timezone"),
+            "kwh_delivered": float(rec["kWhDelivered"]) if rec.get("kWhDelivered") is not None else None,
+            "user_id": str(rec["userID"]) if rec.get("userID") is not None else None,
+            "timezone": str(rec["timezone"]) if rec.get("timezone") is not None else None,
             "session_duration_min": session_dur,
             "charging_duration_min": charging_dur,
             "idle_duration_min": idle_dur,
@@ -118,7 +159,7 @@ def transform_sessions(
                 if not isinstance(ui, dict):
                     continue
                 ui_row = {
-                    "session_id": rec.get("sessionID"),
+                    "session_id": str(rec["sessionID"]) if rec.get("sessionID") is not None else None,
                     "wh_per_mile": ui.get("WhPerMile"),
                     "kwh_requested": ui.get("kWhRequested"),
                     "miles_requested": ui.get("milesRequested"),
@@ -135,6 +176,12 @@ def transform_sessions(
     sessions_df = pd.DataFrame(transformed_rows)
     user_inputs_df = pd.DataFrame(user_input_rows)
 
+    # Ensure identifier columns preserve string types
+    str_cols = ["id", "session_id", "site_id", "cluster_id", "station_id", "space_id", "user_id", "timezone"]
+    for col in str_cols:
+        if col in sessions_df.columns:
+            sessions_df[col] = sessions_df[col].astype(object)
+
     logger.info(
         "Transform: produced %d session rows, %d user-input rows",
         len(sessions_df),
@@ -144,6 +191,10 @@ def transform_sessions(
 
 
 if __name__ == "__main__":
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
     logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
     from ingestion.extract import extract_sessions
     from ingestion.validate import validate_sessions
