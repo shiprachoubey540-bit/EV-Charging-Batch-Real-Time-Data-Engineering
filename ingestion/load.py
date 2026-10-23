@@ -16,9 +16,11 @@ import os
 from pathlib import Path
 
 import pandas as pd
-from dotenv import load_dotenv
-
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 logger = logging.getLogger(__name__)
 

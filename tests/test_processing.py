@@ -11,12 +11,26 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 from processing.batch_transform import (
+    SPARK_AVAILABLE,
+    calculate_avg_power_kw,
     calculate_duration_minutes,
+    create_spark_session,
+    get_daily_aggregation_spark_schema,
+    get_historical_session_spark_schema,
+    get_station_aggregation_spark_schema,
+    get_user_inputs_spark_schema,
+    read_dataframe_safe,
     rfc2822_to_iso,
     run_batch_transforms,
     transform_records_tabular,
     validate_and_classify_record,
+)
+from processing.verify_batch import (
+    assert_staging_readiness,
+    verify_historical_batch,
 )
 
 
@@ -282,7 +296,7 @@ def test_run_batch_transforms_end_to_end(tmp_path, sample_valid_record):
     assert acc["reconciliation_balanced"] is True
 
     # Validate generated Parquet can be read back
-    read_sessions = pd.read_parquet(out_dir / "sessions.parquet")
+    read_sessions = read_dataframe_safe(out_dir / "sessions.parquet")
     assert len(read_sessions) == 1
     assert read_sessions.iloc[0]["id"] == "rec_001"
 
@@ -336,7 +350,152 @@ def test_verify_historical_batch_end_to_end(tmp_path, sample_valid_record):
     assert (val_dir / "monthly_sessions_summary.csv").exists()
     assert (val_dir / "daily_sessions_summary.csv").exists()
     assert (val_dir / "station_summary.csv").exists()
+    assert (val_dir / "hourly_peak_summary.csv").exists()
     assert (val_dir / "energy_and_duration_metrics.json").exists()
+
+
+# ======================================================================
+# PYSPARK BATCH TRANSFORM & STAGING ASSERTION UNIT TESTS
+# ======================================================================
+
+def test_calculate_avg_power_kw():
+    """Verify average charging power calculation in kW."""
+    # 10 kWh in 60 minutes = 10.0 kW
+    assert calculate_avg_power_kw(10.0, 60.0) == 10.0
+    # 25 kWh in 120 minutes = 12.5 kW
+    assert calculate_avg_power_kw(25.0, 120.0) == 12.5
+    # Zero or negative duration returns None safely
+    assert calculate_avg_power_kw(10.0, 0.0) is None
+    assert calculate_avg_power_kw(10.0, -15.0) is None
+    # None inputs
+    assert calculate_avg_power_kw(None, 60.0) is None
+    assert calculate_avg_power_kw(10.0, None) is None
+
+
+def test_spark_session_factory_graceful_or_configured():
+    """Verify create_spark_session handles config overrides and returns None gracefully if PySpark is absent."""
+    overrides = {"spark.sql.shuffle.partitions": "2"}
+    spark = create_spark_session(app_name="test-batch-app", config_overrides=overrides)
+    if not SPARK_AVAILABLE:
+        assert spark is None
+    else:
+        assert spark is not None
+        assert spark.conf.get("spark.sql.session.timeZone") == "UTC"
+        assert spark.conf.get("spark.sql.shuffle.partitions") == "2"
+        spark.stop()
+
+
+def test_spark_schemas_conformance():
+    """Verify PySpark StructType schemas conform strictly to contracts/data_contracts.yaml."""
+    if not SPARK_AVAILABLE:
+        pytest.skip("PySpark is not installed in the test environment")
+
+    sess_schema = get_historical_session_spark_schema()
+    fields = [f.name for f in sess_schema.fields]
+    assert "id" in fields
+    assert "session_id" in fields
+    assert "station_id" in fields
+    assert "site_id" in fields
+    assert "connection_time" in fields
+    assert "disconnect_time" in fields
+    assert "kwh_delivered" in fields
+    assert "session_duration_min" in fields
+    assert "charging_duration_min" in fields
+    assert "idle_duration_min" in fields
+    assert "avg_charging_power_kw" in fields
+
+    ui_schema = get_user_inputs_spark_schema()
+    ui_fields = [f.name for f in ui_schema.fields]
+    assert "session_id" in ui_fields
+    assert "user_id_numeric" in ui_fields
+    assert "payment_required" in ui_fields
+
+    station_schema = get_station_aggregation_spark_schema()
+    st_fields = [f.name for f in station_schema.fields]
+    assert "station_id" in st_fields
+    assert "total_sessions" in st_fields
+    assert "total_energy_kwh" in st_fields
+    assert "avg_charging_power_kw" in st_fields
+
+    daily_schema = get_daily_aggregation_spark_schema()
+    d_fields = [f.name for f in daily_schema.fields]
+    assert "session_date" in d_fields
+    assert "total_sessions" in d_fields
+
+
+def test_assert_staging_readiness_valid(sample_valid_record):
+    """assert_staging_readiness must succeed on clean dataset adhering to contracts."""
+    sess_df, ui_df, _, metrics = transform_records_tabular([sample_valid_record])
+    audit_rep = {
+        "record_accounting": {
+            "clean_session_records": len(sess_df),
+            "user_input_records": len(ui_df),
+        }
+    }
+    result = assert_staging_readiness(sess_df, ui_df, audit_rep)
+    assert result["staging_readiness"] == "PASSED"
+    assert result["clean_sessions"] == 1
+
+
+def test_assert_staging_readiness_detects_violations(sample_valid_record):
+    """assert_staging_readiness must raise AssertionError on contract or quality violations."""
+    sess_df, ui_df, _, _ = transform_records_tabular([sample_valid_record])
+
+    # 1. Null primary key constraint violation
+    bad_sess_df = sess_df.copy()
+    bad_sess_df.loc[0, "session_id"] = None
+    audit_rep = {
+        "record_accounting": {
+            "clean_session_records": len(bad_sess_df),
+            "user_input_records": len(ui_df),
+        }
+    }
+    with pytest.raises(AssertionError, match="Null constraint violated"):
+        assert_staging_readiness(bad_sess_df, ui_df, audit_rep)
+
+    # 2. Negative energy violation
+    bad_energy_df = sess_df.copy()
+    bad_energy_df.loc[0, "kwh_delivered"] = -10.0
+    with pytest.raises(AssertionError, match="Non-negative constraint violated"):
+        assert_staging_readiness(bad_energy_df, ui_df, audit_rep)
+
+    # 3. Orphaned user_input foreign key violation
+    bad_ui_df = ui_df.copy()
+    bad_ui_df.loc[0, "session_id"] = "non_existent_session_id_999"
+    with pytest.raises(AssertionError, match="Referential integrity failure"):
+        assert_staging_readiness(sess_df, bad_ui_df, audit_rep)
+
+
+def test_run_batch_transforms_on_sample_sessions_dataset(tmp_path):
+    """run_batch_transforms must successfully process data/sample/sample_sessions.json."""
+    sample_file = PROJECT_ROOT / "data" / "sample" / "sample_sessions.json"
+    if not sample_file.exists():
+        pytest.skip("data/sample/sample_sessions.json does not exist")
+
+    out_dir = tmp_path / "sample_batch_out"
+    report = run_batch_transforms(
+        input_path=sample_file,
+        output_dir=out_dir,
+        engine="pandas",
+    )
+
+    assert report["pipeline_name"] == "historical_batch_etl"
+    assert report["record_accounting"]["total_input_records"] >= 4
+    assert report["record_accounting"]["clean_session_records"] >= 1
+    assert report["record_accounting"]["reconciliation_balanced"] is True
+
+    # Check generated files
+    assert (out_dir / "sessions.parquet").exists()
+    assert (out_dir / "user_inputs.parquet").exists()
+    assert (out_dir / "quarantine.json").exists()
+    assert (out_dir / "station_summary.csv").exists()
+    assert (out_dir / "daily_summary.csv").exists()
+    assert (out_dir / "hourly_peak_summary.csv").exists()
+    assert (out_dir / "etl_audit_report.json").exists()
+
+    clean_sessions = read_dataframe_safe(out_dir / "sessions.parquet")
+    assert len(clean_sessions) == report["record_accounting"]["clean_session_records"]
+    assert "avg_charging_power_kw" in clean_sessions.columns
 # ======================================================================
 # STREAM TRANSFORM COMPATIBILITY TESTS (FEATURE/STREAMING)
 # ======================================================================
