@@ -181,7 +181,7 @@ def load_sessions_data() -> Tuple[pd.DataFrame, dict[str, Any]]:
                 df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce", utc=True)
 
         # Standardize numerics
-        for num_col in ["kwh_delivered", "session_duration_min", "charging_duration_min", "idle_duration_min"]:
+        for num_col in ["kwh_delivered", "session_duration_min", "charging_duration_min", "idle_duration_min", "avg_charging_power_kw"]:
             if num_col in df.columns:
                 df[num_col] = pd.to_numeric(df[num_col], errors="coerce")
 
@@ -300,3 +300,4 @@ def load_pipeline_audit_reports() -> dict[str, Any]:
             pass
 
     return results
+

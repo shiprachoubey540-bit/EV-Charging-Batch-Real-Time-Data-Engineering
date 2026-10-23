@@ -118,6 +118,7 @@ def plot_station_comparison_bar(df: pd.DataFrame, metric: str = "energy", top_n:
             total_kwh=("kwh_delivered", "sum"),
             session_count=("session_id", "count"),
             avg_duration=("session_duration_min", "mean"),
+            avg_power_kw=("avg_charging_power_kw", "mean") if "avg_charging_power_kw" in df.columns else ("kwh_delivered", "mean"),
         )
         .reset_index()
     )
@@ -130,6 +131,12 @@ def plot_station_comparison_bar(df: pd.DataFrame, metric: str = "energy", top_n:
         x_title = "Total Sessions Processed"
         bar_color = COLOR_AMBER
         text_fmt = "%{x:,}"
+    elif metric == "power" and "avg_power_kw" in station_agg.columns:
+        station_agg = station_agg.sort_values(by="avg_power_kw", ascending=True)
+        x_col = "avg_power_kw"
+        x_title = "Average Charging Power (kW)"
+        bar_color = COLOR_CYAN
+        text_fmt = "%{x:.2f} kW"
     elif metric == "kwh_per_session":
         station_agg = station_agg.sort_values(by="kwh_per_session", ascending=True)
         x_col = "kwh_per_session"
@@ -230,6 +237,7 @@ def plot_station_performance_quadrant(df: pd.DataFrame) -> go.Figure:
             session_count=("session_id", "count"),
             total_kwh=("kwh_delivered", "sum"),
             avg_duration=("session_duration_min", "mean"),
+            avg_power_kw=("avg_charging_power_kw", "mean") if "avg_charging_power_kw" in df.columns else ("kwh_delivered", "mean"),
         )
         .reset_index()
     )
@@ -521,3 +529,5 @@ def plot_driver_preferences(user_df: pd.DataFrame) -> go.Figure:
         },
     )
     return apply_plotly_theme(fig, height=360)
+
+
