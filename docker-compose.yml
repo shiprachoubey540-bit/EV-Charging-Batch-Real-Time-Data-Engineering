@@ -1,0 +1,120 @@
+# ============================================================
+# EV Charging Pipeline — Local Infrastructure Services
+#
+# Services:
+#   - Apache Kafka with KRaft (ports: 9092)
+#   - PostgreSQL analytical storage (ports: ${POSTGRES_PORT:-5432}:5432)
+# ============================================================
+
+services:
+  kafka:
+    image: apache/kafka:3.8.0
+    container_name: ev_charging_kafka
+    ports:
+      - "9092:9092"
+    environment:
+      # KRaft mode configuration
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: ev_charging_postgres
+    restart: unless-stopped
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ev_charging}
+      POSTGRES_USER: ${POSTGRES_USER:-ev_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ev_password}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./database/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ev_user} -d ${POSTGRES_DB:-ev_charging}" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  airflow:
+    image: apache/airflow:2.9.2-python3.11
+    container_name: ev_charging_airflow
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${AIRFLOW_WEBSERVER_PORT:-8085}:8080"
+    environment:
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=False
+      - AIRFLOW__CORE__DAGS_FOLDER=/opt/airflow/dags
+      - AIRFLOW__CORE__DEFAULT_TIMEZONE=utc
+      - AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE=utc
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
+      - PYTHONPATH=/opt/airflow/project
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-ev_charging}
+      - POSTGRES_USER=${POSTGRES_USER:-ev_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-ev_password}
+      - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS:-host.docker.internal:9092}
+      - _AIRFLOW_DB_MIGRATE=true
+      - _AIRFLOW_WWW_USER_CREATE=true
+      - _AIRFLOW_WWW_USER_USERNAME=${AIRFLOW_WWW_USER_USERNAME:-admin}
+      - _AIRFLOW_WWW_USER_PASSWORD=${AIRFLOW_WWW_USER_PASSWORD:-admin}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./orchestration/dags:/opt/airflow/dags:ro
+      - .:/opt/airflow/project:ro
+      - airflow_data:/opt/airflow
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:8080/health || exit 0" ]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    command: standalone
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.streamlit
+    image: ev_charging_dashboard:latest
+    container_name: ev_charging_dashboard
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${STREAMLIT_SERVER_PORT:-8501}:8501"
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-ev_charging}
+      - POSTGRES_USER=${POSTGRES_USER:-ev_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-ev_password}
+      - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS:-host.docker.internal:9092}
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+      - STREAMLIT_SERVER_HEADLESS=true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - .:/app:ro
+
+volumes:
+  pg_data:
+  airflow_data:
