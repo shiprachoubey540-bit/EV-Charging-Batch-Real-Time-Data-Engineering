@@ -1,4 +1,4 @@
-﻿-- ============================================================
+-- ============================================================
 -- database/analytics.sql — Analytical queries
 -- Owner: Bainty Kaur
 -- Historical queries use charging_sessions (real ACN-Data,
@@ -14,7 +14,7 @@ GROUP BY station_id
 ORDER BY total_kwh DESC;
 
 -- 2. Monthly sessions and energy
-SELECT DATE_TRUNC('month', connection_time) AS month,
+SELECT DATE_TRUNC('month', connection_time AT TIME ZONE 'America/Los_Angeles') AS month,
        COUNT(*)                             AS sessions,
        ROUND(SUM(kwh_delivered)::numeric, 2) AS total_kwh
 FROM charging_sessions

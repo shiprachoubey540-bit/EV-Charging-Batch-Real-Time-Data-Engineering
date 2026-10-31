@@ -1,4 +1,4 @@
-﻿-- ============================================================
+-- ============================================================
 -- database/quality_checks.sql — Data-quality validation queries
 -- Owner: Bainty Kaur
 -- Every check returns a count. Expected result: 0 unless noted.

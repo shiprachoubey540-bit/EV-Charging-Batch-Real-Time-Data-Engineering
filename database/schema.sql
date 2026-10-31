@@ -1,5 +1,5 @@
 -- ============================================================
--- database/schema.sql — PostgreSQL warehouse schema
+-- database/schema.sql â€” PostgreSQL warehouse schema
 -- Owner: Bainty Kaur
 -- Built from contracts/data_contracts.yaml and the batch
 -- handoff spec (sessions.parquet: 17 cols, user_inputs.parquet: 9 cols)
