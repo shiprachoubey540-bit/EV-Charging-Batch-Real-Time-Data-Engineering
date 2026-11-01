@@ -9,6 +9,7 @@ python-dotenv>=1.0.0
 # -------------------- Data Processing --------------------
 pandas>=2.0.0
 numpy>=1.24.0
+pyarrow>=14.0.0
 
 # -------------------- Apache Kafka --------------------
 confluent-kafka>=2.3.0
