@@ -112,6 +112,11 @@ def plot_station_comparison_bar(df: pd.DataFrame, metric: str = "energy", top_n:
     if "station_id" not in df.columns or "kwh_delivered" not in df.columns:
         return apply_plotly_theme(go.Figure(), "Station Performance")
 
+    # Drop rows without a valid station_id to avoid "undefined" category labels
+    df = df.dropna(subset=["station_id"])
+    if df.empty:
+        return apply_plotly_theme(go.Figure(), "Station Performance (No Data)")
+
     station_agg = (
         df.groupby("station_id")
         .agg(
@@ -180,11 +185,26 @@ def plot_demand_heatmap(df: pd.DataFrame, metric: str = "sessions", use_local_tz
     if hour_col not in df.columns or day_col not in df.columns:
         return apply_plotly_theme(go.Figure(), "Charging Demand Heatmap")
 
-    day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    # Drop rows with null day/hour values to avoid "undefined" labels in Plotly JS
+    _VALID_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    _hm = df.dropna(subset=[day_col, hour_col]).copy()
+    _hm[hour_col] = _hm[hour_col].astype(int)
+    _hm = _hm[_hm[day_col].isin(_VALID_DAYS)]
 
-    if metric == "energy" and "kwh_delivered" in df.columns:
+    if len(_hm) < 2:
+        fig = go.Figure()
+        fig.add_annotation(
+            text="Insufficient data for heatmap -- load full dataset to see demand patterns",
+            xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False,
+            font=dict(size=13),
+        )
+        return apply_plotly_theme(fig, "Charging Demand Heatmap (Awaiting Data)", height=330)
+
+    day_order = _VALID_DAYS
+
+    if metric == "energy" and "kwh_delivered" in _hm.columns:
         pivot = (
-            df.groupby([day_col, hour_col])["kwh_delivered"]
+            _hm.groupby([day_col, hour_col])["kwh_delivered"]
             .sum()
             .unstack(fill_value=0.0)
             .reindex(day_order)
@@ -194,7 +214,7 @@ def plot_demand_heatmap(df: pd.DataFrame, metric: str = "sessions", use_local_tz
         colorscale = "Viridis"
     else:
         pivot = (
-            df.groupby([day_col, hour_col])
+            _hm.groupby([day_col, hour_col])
             .size()
             .unstack(fill_value=0)
             .reindex(day_order)
@@ -202,6 +222,17 @@ def plot_demand_heatmap(df: pd.DataFrame, metric: str = "sessions", use_local_tz
         )
         val_label = "Sessions"
         colorscale = "Blues"
+
+    # Remove days with zero sessions to prevent blank NaN rows
+    pivot = pivot.loc[pivot.sum(axis=1) > 0]
+    if pivot.empty:
+        fig = go.Figure()
+        fig.add_annotation(
+            text="No session data in filtered range",
+            xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False,
+            font=dict(size=13),
+        )
+        return apply_plotly_theme(fig, "Charging Demand Heatmap (No Data)", height=330)
 
     for h in range(24):
         if h not in pivot.columns:
@@ -230,6 +261,11 @@ def plot_station_performance_quadrant(df: pd.DataFrame) -> go.Figure:
     """
     if "station_id" not in df.columns or "kwh_delivered" not in df.columns:
         return apply_plotly_theme(go.Figure(), "Station Performance Quadrant")
+
+    # Drop rows with null station_id to avoid "undefined" scatter labels
+    df = df.dropna(subset=["station_id"])
+    if df.empty:
+        return apply_plotly_theme(go.Figure(), "Station Performance Quadrant (No Data)")
 
     stn = (
         df.groupby("station_id")

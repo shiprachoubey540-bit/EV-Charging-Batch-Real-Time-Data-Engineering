@@ -1,5 +1,5 @@
 """
-dashboard/components/data_loader.py — Multi-tiered Data Access Layer for Streamlit.
+dashboard/components/data_loader.py â€” Multi-tiered Data Access Layer for Streamlit.
 
 Owner: Shipra Choubey
 
@@ -27,6 +27,12 @@ import streamlit as st
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv(PROJECT_ROOT / '.env', override=True)
+except ImportError:
+    pass
 PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 HISTORICAL_BATCH_DIR = PROCESSED_DIR / "historical_batch"
 VALIDATION_DIR = PROCESSED_DIR / "validation"
