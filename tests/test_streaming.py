@@ -23,19 +23,31 @@ except ImportError:
     F = None
 
 from processing.stream_transform import (
+    CHARGING_EVENTS_COLUMNS,
+    POSTGRES_EVENTS_TABLE,
+    POSTGRES_METRICS_TABLE,
+    POSTGRES_TABLE,
     SPARK_AVAILABLE,
+    STATION_WINDOW_METRICS_COLUMNS,
+    CompositeStreamingQuery,
     StreamingMicroBatchEngine,
     apply_watermark_and_deduplication,
     compute_streaming_station_aggregations,
     configure_console_sink,
     configure_memory_sink,
+    configure_postgres_events_sink,
+    configure_postgres_metrics_sink,
+    configure_postgres_sink,
     create_kafka_read_stream,
     create_streaming_session,
     decode_and_validate_stream,
+    get_charging_events_postgres_schema,
     get_station_aggregation_spark_schema,
+    get_station_window_metrics_postgres_schema,
     get_streaming_event_spark_schema,
     parse_and_transform_event,
     stop_query_gracefully,
+    write_postgres_micro_batch,
 )
 from streaming.event_generator import generate_event, stream_events
 from streaming.kafka_smoke_test import check_kafka_connectivity
@@ -429,3 +441,247 @@ def test_stop_query_gracefully_handles_none_and_active_queries():
     assert stop_query_gracefully(mock_query, timeout_seconds=1.0) is True
     mock_query.stop.assert_called_once()
     mock_query.awaitTermination.assert_called_once_with(timeout=1.0)
+
+
+# ======================================================================
+# 7. POSTGRESQL STREAMING SINK TESTS (charging_events & station_window_metrics)
+# ======================================================================
+
+def test_charging_events_postgres_schema_conformance():
+    """Verify charging_events sink schema matches database/schema.sql."""
+    if not SPARK_AVAILABLE:
+        pytest.skip("PySpark is not installed in the current environment")
+
+    schema = get_charging_events_postgres_schema()
+    fields = [f.name for f in schema.fields]
+    assert fields == [
+        "event_id",
+        "station_id",
+        "session_id",
+        "event_type",
+        "event_timestamp",
+        "energy_kwh",
+        "incremental_kwh",
+    ]
+    # In relational schema, timestamp and kafka_timestamp must NOT exist
+    assert "timestamp" not in fields
+    assert "kafka_timestamp" not in fields
+
+
+def test_station_window_metrics_postgres_schema_conformance():
+    """Verify station_window_metrics sink schema matches database/schema.sql."""
+    if not SPARK_AVAILABLE:
+        pytest.skip("PySpark is not installed in the current environment")
+
+    schema = get_station_window_metrics_postgres_schema()
+    fields = [f.name for f in schema.fields]
+    assert fields == [
+        "station_id",
+        "window_start",
+        "window_end",
+        "event_count",
+        "total_incremental_kwh",
+        "max_cumulative_kwh",
+    ]
+
+
+def test_charging_events_sink_column_filtering():
+    """
+    Verify individual events sink drops timestamp and kafka_timestamp,
+    and retains strictly canonical columns before writing to PostgreSQL.
+    """
+    if not SPARK_AVAILABLE:
+        pytest.skip("PySpark is not installed in the current environment")
+
+    spark = create_streaming_session(app_name="Test-Events-Sink-Columns")
+    try:
+        sample_messages = [
+            (
+                "evt-1",
+                json.dumps({
+                    "event_id": "evt-00000000-0000-0000-0000-000000000001",
+                    "station_id": "2-39-81-4550",
+                    "session_id": "sess-sink-1",
+                    "event_type": "energy_update",
+                    "timestamp": "2026-10-24T12:00:00+00:00",
+                    "energy_kwh": 10.0,
+                    "incremental_kwh": 2.5,
+                }),
+                "charging-events",
+                0,
+                101,
+                datetime(2026, 10, 24, 12, 0, 0, tzinfo=timezone.utc),
+            )
+        ]
+        columns = ["key", "value", "topic", "partition", "offset", "timestamp"]
+        raw_df = spark.createDataFrame(sample_messages, columns)
+
+        valid_df, _ = decode_and_validate_stream(raw_df)
+        deduped_df = apply_watermark_and_deduplication(valid_df)
+
+        # deduped_df still contains streaming helper columns
+        assert "timestamp" in deduped_df.columns
+        assert "kafka_timestamp" in deduped_df.columns
+
+        # Projection for charging_events PostgreSQL sink
+        events_df = deduped_df.select(*CHARGING_EVENTS_COLUMNS)
+
+        # Strictly canonical columns
+        assert events_df.columns == [
+            "event_id",
+            "station_id",
+            "session_id",
+            "event_type",
+            "event_timestamp",
+            "energy_kwh",
+            "incremental_kwh",
+        ]
+        assert "timestamp" not in events_df.columns
+        assert "kafka_timestamp" not in events_df.columns
+
+        row = events_df.first()
+        assert row["event_id"] == "evt-00000000-0000-0000-0000-000000000001"
+        assert row["station_id"] == "2-39-81-4550"
+        assert row["energy_kwh"] == 10.0
+        assert row["incremental_kwh"] == 2.5
+    finally:
+        spark.stop()
+
+
+def test_station_window_metrics_sink_column_mapping():
+    """
+    Verify windowed aggregates sink maps metrics_df to ensure exact
+    relational columns are selected for station_window_metrics.
+    """
+    if not SPARK_AVAILABLE:
+        pytest.skip("PySpark is not installed in the current environment")
+
+    spark = create_streaming_session(app_name="Test-Metrics-Sink-Columns")
+    try:
+        sample_messages = [
+            (
+                "evt-1",
+                json.dumps({
+                    "event_id": "evt-00000000-0000-0000-0000-000000000001",
+                    "station_id": "2-39-81-4550",
+                    "session_id": "sess-metric-1",
+                    "event_type": "energy_update",
+                    "timestamp": "2026-10-24T12:00:00+00:00",
+                    "energy_kwh": 5.0,
+                    "incremental_kwh": 5.0,
+                }),
+                "charging-events",
+                0,
+                101,
+                datetime(2026, 10, 24, 12, 0, 0, tzinfo=timezone.utc),
+            )
+        ]
+        columns = ["key", "value", "topic", "partition", "offset", "timestamp"]
+        raw_df = spark.createDataFrame(sample_messages, columns)
+
+        valid_df, _ = decode_and_validate_stream(raw_df)
+        deduped_df = apply_watermark_and_deduplication(valid_df)
+        metrics_df = compute_streaming_station_aggregations(deduped_df)
+
+        mapped_metrics_df = metrics_df.select(*STATION_WINDOW_METRICS_COLUMNS)
+
+        assert mapped_metrics_df.columns == [
+            "station_id",
+            "window_start",
+            "window_end",
+            "event_count",
+            "total_incremental_kwh",
+            "max_cumulative_kwh",
+        ]
+
+        row = mapped_metrics_df.first()
+        assert row["station_id"] == "2-39-81-4550"
+        assert row["event_count"] == 1
+        assert row["total_incremental_kwh"] == 5.0
+        assert row["max_cumulative_kwh"] == 5.0
+    finally:
+        spark.stop()
+
+
+def test_write_postgres_micro_batch_delegates_to_jdbc_writer():
+    """Verify write_postgres_micro_batch correctly formats JDBC parameters and options."""
+    mock_df = MagicMock()
+    mock_df.isEmpty.return_value = False
+    mock_df.columns = [
+        "event_id",
+        "station_id",
+        "session_id",
+        "event_type",
+        "timestamp",
+        "event_timestamp",
+        "energy_kwh",
+        "incremental_kwh",
+        "kafka_timestamp",
+    ]
+
+    mock_selected = MagicMock()
+    mock_df.select.return_value = mock_selected
+
+    mock_write = MagicMock()
+    mock_format = MagicMock()
+    mock_opt1 = MagicMock()
+    mock_opt2 = MagicMock()
+    mock_opt3 = MagicMock()
+    mock_opt4 = MagicMock()
+    mock_opt5 = MagicMock()
+    mock_mode = MagicMock()
+
+    mock_selected.write = mock_write
+    mock_write.format.return_value = mock_format
+    mock_format.option.return_value = mock_opt1
+    mock_opt1.option.return_value = mock_opt2
+    mock_opt2.option.return_value = mock_opt3
+    mock_opt3.option.return_value = mock_opt4
+    mock_opt4.option.return_value = mock_opt5
+    mock_opt5.mode.return_value = mock_mode
+
+    write_postgres_micro_batch(
+        mock_df,
+        batch_id=1,
+        table_name="charging_events",
+        db_config={
+            "host": "localhost",
+            "port": "5432",
+            "database": "ev_charging_db",
+            "user": "postgres",
+            "password": "secret_password",
+        },
+    )
+
+    # Verify select was called with strictly canonical columns
+    mock_df.select.assert_called_once_with(*CHARGING_EVENTS_COLUMNS)
+
+    # Verify JDBC write flow
+    mock_write.format.assert_called_once_with("jdbc")
+    mock_mode.save.assert_called_once()
+
+
+def test_composite_streaming_query_lifecycle():
+    """Verify CompositeStreamingQuery delegates isActive, stop, awaitTermination, and indexing."""
+    q1 = MagicMock()
+    q2 = MagicMock()
+    q1.isActive = True
+    q2.isActive = False
+
+    comp = CompositeStreamingQuery([q1, q2])
+
+    assert comp.isActive is True
+    assert len(comp) == 2
+    assert comp[0] == q1
+    assert comp[1] == q2
+
+    # Test iteration
+    items = list(comp)
+    assert items == [q1, q2]
+
+    # Test stop & graceful shutdown
+    assert stop_query_gracefully(comp, timeout_seconds=1.5) is True
+    q1.stop.assert_called_once()
+    q2.stop.assert_called_once()
+    q1.awaitTermination.assert_called_once_with(timeout=1.5)
+    q2.awaitTermination.assert_called_once_with(timeout=1.5)
