@@ -54,6 +54,28 @@ DEFAULT_WATERMARK_DURATION = "10 minutes"
 DEFAULT_WINDOW_DURATION = "10 minutes"
 DEFAULT_CHECKPOINT_DIR = os.getenv("SPARK_STREAMING_CHECKPOINT_DIR", "/tmp/spark_streaming_checkpoints")
 POSTGRES_TABLE = "charging_events"
+POSTGRES_EVENTS_TABLE = "charging_events"
+POSTGRES_METRICS_TABLE = "station_window_metrics"
+
+# Canonical columns for PostgreSQL relational sinks (database/schema.sql)
+CHARGING_EVENTS_COLUMNS = [
+    "event_id",
+    "station_id",
+    "session_id",
+    "event_type",
+    "event_timestamp",
+    "energy_kwh",
+    "incremental_kwh",
+]
+
+STATION_WINDOW_METRICS_COLUMNS = [
+    "station_id",
+    "window_start",
+    "window_end",
+    "event_count",
+    "total_incremental_kwh",
+    "max_cumulative_kwh",
+]
 
 # Verified station identifier regex (Caltech fleet pattern: e.g. "2-39-81-4550", "2-39-139-28")
 STATION_ID_REGEX = re.compile(r"^\d+-\d+-\d+-\d+$")
@@ -151,6 +173,43 @@ def get_station_aggregation_spark_schema() -> StructType:
         StructField("max_cumulative_kwh", DoubleType(), False),
         StructField("window_start", TimestampType(), True),
         StructField("window_end", TimestampType(), True),
+    ])
+
+
+def get_charging_events_postgres_schema() -> StructType:
+    """
+    Returns the PySpark StructType schema for the charging_events PostgreSQL sink.
+    Strictly conforms to database/schema.sql (excluding default columns is_synthetic and created_at).
+    """
+    if not SPARK_AVAILABLE:
+        raise RuntimeError("PySpark is not installed in the current environment.")
+
+    return StructType([
+        StructField("event_id", StringType(), False),
+        StructField("station_id", StringType(), False),
+        StructField("session_id", StringType(), False),
+        StructField("event_type", StringType(), False),
+        StructField("event_timestamp", TimestampType(), False),
+        StructField("energy_kwh", DoubleType(), False),
+        StructField("incremental_kwh", DoubleType(), True),
+    ])
+
+
+def get_station_window_metrics_postgres_schema() -> StructType:
+    """
+    Returns the PySpark StructType schema for the station_window_metrics PostgreSQL sink.
+    Strictly conforms to database/schema.sql (excluding serial id, default is_synthetic, and created_at).
+    """
+    if not SPARK_AVAILABLE:
+        raise RuntimeError("PySpark is not installed in the current environment.")
+
+    return StructType([
+        StructField("station_id", StringType(), False),
+        StructField("window_start", TimestampType(), False),
+        StructField("window_end", TimestampType(), False),
+        StructField("event_count", LongType(), False),
+        StructField("total_incremental_kwh", DoubleType(), False),
+        StructField("max_cumulative_kwh", DoubleType(), False),
     ])
 
 
@@ -489,56 +548,188 @@ def configure_memory_sink(
     )
 
 
+class CompositeStreamingQuery:
+    """
+    Composite handle for managing multiple concurrent Spark StreamingQuery instances
+    (e.g., simultaneous writes to charging_events and station_window_metrics).
+    """
+
+    def __init__(self, queries: List[Any]):
+        self.queries = [q for q in queries if q is not None]
+
+    @property
+    def isActive(self) -> bool:
+        return any(getattr(q, "isActive", False) for q in self.queries)
+
+    def stop(self) -> None:
+        for q in self.queries:
+            if hasattr(q, "stop"):
+                q.stop()
+
+    def awaitTermination(self, timeout: Optional[Union[int, float]] = None) -> Optional[bool]:
+        results = []
+        for q in self.queries:
+            if hasattr(q, "awaitTermination"):
+                res = q.awaitTermination(timeout=timeout)
+                results.append(res)
+        return all(results) if results and all(isinstance(r, bool) for r in results) else None
+
+    def processAllAvailable(self) -> None:
+        for q in self.queries:
+            if hasattr(q, "processAllAvailable"):
+                q.processAllAvailable()
+
+    def __iter__(self):
+        return iter(self.queries)
+
+    def __getitem__(self, idx: int):
+        return self.queries[idx]
+
+    def __len__(self) -> int:
+        return len(self.queries)
+
+
+def write_postgres_micro_batch(
+    batch_df: SparkDataFrame,
+    batch_id: int,
+    table_name: str = POSTGRES_TABLE,
+    db_config: Optional[Dict[str, str]] = None,
+) -> SparkDataFrame:
+    """
+    Write a streaming micro-batch DataFrame to PostgreSQL using JDBC.
+    Ensures column filtering and selection match Bainty's PostgreSQL relational schema:
+      - charging_events: retains strictly event_id, station_id, session_id,
+        event_type, event_timestamp, energy_kwh, incremental_kwh.
+        Drops unnecessary columns (timestamp, kafka_timestamp).
+      - station_window_metrics: retains strictly station_id, window_start,
+        window_end, event_count, total_incremental_kwh, max_cumulative_kwh.
+    """
+    if batch_df.isEmpty():
+        return batch_df
+
+    # Determine target columns based on target table
+    write_df = batch_df
+    if table_name == POSTGRES_METRICS_TABLE or table_name == "station_window_metrics":
+        if all(c in batch_df.columns for c in STATION_WINDOW_METRICS_COLUMNS):
+            write_df = batch_df.select(*STATION_WINDOW_METRICS_COLUMNS)
+    elif table_name in (POSTGRES_EVENTS_TABLE, POSTGRES_TABLE, "charging_events"):
+        if all(c in batch_df.columns for c in CHARGING_EVENTS_COLUMNS):
+            write_df = batch_df.select(*CHARGING_EVENTS_COLUMNS)
+
+    cfg = db_config or {}
+    db_host = cfg.get("host") or os.getenv("POSTGRES_HOST", "localhost")
+    db_port = cfg.get("port") or os.getenv("POSTGRES_PORT", "5432")
+    db_name = cfg.get("database") or os.getenv("POSTGRES_DB", "ev_charging_db")
+    db_user = cfg.get("user") or os.getenv("POSTGRES_USER", "postgres")
+    db_password = cfg.get("password") or os.getenv("POSTGRES_PASSWORD", "postgres")
+
+    jdbc_url = f"jdbc:postgresql://{db_host}:{db_port}/{db_name}"
+
+    (
+        write_df.write.format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", table_name)
+        .option("user", db_user)
+        .option("password", db_password)
+        .option("driver", "org.postgresql.Driver")
+        .mode("append")
+        .save()
+    )
+    return write_df
+
+
 def configure_postgres_sink(
     df: SparkDataFrame,
-    table_name: str = POSTGRES_TABLE,
+    table_name: Optional[str] = None,
     checkpoint_location: Optional[str] = None,
     trigger_interval: str = "10 seconds",
 ):
     """
     Write streaming micro-batches to PostgreSQL using foreachBatch.
+    Automatically ensures column projection matches PostgreSQL relational schema:
+      - charging_events: event_id, station_id, session_id, event_type, event_timestamp, energy_kwh, incremental_kwh
+      - station_window_metrics: station_id, window_start, window_end, event_count, total_incremental_kwh, max_cumulative_kwh
     """
-    ckpt = checkpoint_location or f"{DEFAULT_CHECKPOINT_DIR}/{table_name}"
+    if table_name is None or table_name == POSTGRES_TABLE:
+        if "window_start" in df.columns or "window_end" in df.columns:
+            target_table = POSTGRES_METRICS_TABLE
+        else:
+            target_table = POSTGRES_EVENTS_TABLE
+    else:
+        target_table = table_name
+
+    target_df = df
+    if target_table == POSTGRES_METRICS_TABLE or target_table == "station_window_metrics":
+        if all(c in df.columns for c in STATION_WINDOW_METRICS_COLUMNS):
+            target_df = df.select(*STATION_WINDOW_METRICS_COLUMNS)
+    elif target_table in (POSTGRES_EVENTS_TABLE, POSTGRES_TABLE, "charging_events"):
+        if all(c in df.columns for c in CHARGING_EVENTS_COLUMNS):
+            target_df = df.select(*CHARGING_EVENTS_COLUMNS)
+
+    ckpt = checkpoint_location or f"{DEFAULT_CHECKPOINT_DIR}/{target_table}"
+    query_name = f"{target_table}_postgres_sink"
 
     def write_micro_batch(batch_df: SparkDataFrame, batch_id: int):
-        if batch_df.isEmpty():
-            return
-
-        db_host = os.getenv("POSTGRES_HOST", "localhost")
-        db_port = os.getenv("POSTGRES_PORT", "5432")
-        db_name = os.getenv("POSTGRES_DB", "ev_charging_db")
-        db_user = os.getenv("POSTGRES_USER", "postgres")
-        db_password = os.getenv("POSTGRES_PASSWORD", "postgres")
-
-        jdbc_url = f"jdbc:postgresql://{db_host}:{db_port}/{db_name}"
-
-        (
-            batch_df.write.format("jdbc")
-            .option("url", jdbc_url)
-            .option("dbtable", table_name)
-            .option("user", db_user)
-            .option("password", db_password)
-            .option("driver", "org.postgresql.Driver")
-            .mode("append")
-            .save()
-        )
+        write_postgres_micro_batch(batch_df, batch_id, table_name=target_table)
 
     return (
-        df.writeStream.foreachBatch(write_micro_batch)
+        target_df.writeStream.queryName(query_name)
+        .foreachBatch(write_micro_batch)
         .trigger(processingTime=trigger_interval)
         .option("checkpointLocation", ckpt)
         .start()
     )
 
 
+def configure_postgres_events_sink(
+    df: SparkDataFrame,
+    table_name: str = POSTGRES_EVENTS_TABLE,
+    checkpoint_location: Optional[str] = None,
+    trigger_interval: str = "10 seconds",
+):
+    """
+    Write individual streaming events to the PostgreSQL charging_events table.
+    Filters out unneeded streaming metadata (timestamp, kafka_timestamp)
+    and strictly projects canonical columns:
+    event_id, station_id, session_id, event_type, event_timestamp, energy_kwh, incremental_kwh.
+    """
+    events_to_write = df.select(*CHARGING_EVENTS_COLUMNS)
+    return configure_postgres_sink(
+        events_to_write,
+        table_name=table_name,
+        checkpoint_location=checkpoint_location,
+        trigger_interval=trigger_interval,
+    )
+
+
+def configure_postgres_metrics_sink(
+    df: SparkDataFrame,
+    table_name: str = POSTGRES_METRICS_TABLE,
+    checkpoint_location: Optional[str] = None,
+    trigger_interval: str = "10 seconds",
+):
+    """
+    Write windowed aggregation metrics to the PostgreSQL station_window_metrics table.
+    Strictly projects canonical columns:
+    station_id, window_start, window_end, event_count, total_incremental_kwh, max_cumulative_kwh.
+    """
+    metrics_to_write = df.select(*STATION_WINDOW_METRICS_COLUMNS)
+    return configure_postgres_sink(
+        metrics_to_write,
+        table_name=table_name,
+        checkpoint_location=checkpoint_location,
+        trigger_interval=trigger_interval,
+    )
+
+
 def stop_query_gracefully(query: Any, timeout_seconds: float = 2.0) -> bool:
     """
-    Safely stop an active Spark StreamingQuery.
+    Safely stop an active Spark StreamingQuery or CompositeStreamingQuery.
 
     Parameters
     ----------
     query : Any
-        StreamingQuery instance or None.
+        StreamingQuery instance, CompositeStreamingQuery, list/tuple of queries, or None.
     timeout_seconds : float
         Await termination timeout.
 
@@ -551,6 +742,8 @@ def stop_query_gracefully(query: Any, timeout_seconds: float = 2.0) -> bool:
         return True
 
     try:
+        if isinstance(query, (list, tuple)):
+            return all(stop_query_gracefully(q, timeout_seconds=timeout_seconds) for q in query)
         if hasattr(query, "stop"):
             query.stop()
         if hasattr(query, "awaitTermination"):
@@ -902,7 +1095,40 @@ def run_stream_transforms(
     elif output_sink == "memory":
         query = configure_memory_sink(metrics_df)
     elif output_sink == "postgres":
-        query = configure_postgres_sink(metrics_df, checkpoint_location=checkpoint_dir)
+        ckpt_base = checkpoint_dir or DEFAULT_CHECKPOINT_DIR
+        ckpt_events = f"{ckpt_base}/{POSTGRES_EVENTS_TABLE}"
+        ckpt_metrics = f"{ckpt_base}/{POSTGRES_METRICS_TABLE}"
+
+        events_to_write = deduped_df.select(*CHARGING_EVENTS_COLUMNS)
+        metrics_to_write = metrics_df.select(*STATION_WINDOW_METRICS_COLUMNS)
+
+        events_query = configure_postgres_sink(
+            events_to_write,
+            table_name=POSTGRES_EVENTS_TABLE,
+            checkpoint_location=ckpt_events,
+        )
+        metrics_query = configure_postgres_sink(
+            metrics_to_write,
+            table_name=POSTGRES_METRICS_TABLE,
+            checkpoint_location=ckpt_metrics,
+        )
+        return CompositeStreamingQuery([events_query, metrics_query])
+    elif output_sink in ("postgres_events", "charging_events"):
+        ckpt = f"{(checkpoint_dir or DEFAULT_CHECKPOINT_DIR)}/{POSTGRES_EVENTS_TABLE}"
+        events_to_write = deduped_df.select(*CHARGING_EVENTS_COLUMNS)
+        return configure_postgres_sink(
+            events_to_write,
+            table_name=POSTGRES_EVENTS_TABLE,
+            checkpoint_location=ckpt,
+        )
+    elif output_sink in ("postgres_metrics", "station_window_metrics"):
+        ckpt = f"{(checkpoint_dir or DEFAULT_CHECKPOINT_DIR)}/{POSTGRES_METRICS_TABLE}"
+        metrics_to_write = metrics_df.select(*STATION_WINDOW_METRICS_COLUMNS)
+        return configure_postgres_sink(
+            metrics_to_write,
+            table_name=POSTGRES_METRICS_TABLE,
+            checkpoint_location=ckpt,
+        )
     else:
         raise ValueError(f"Unsupported output_sink: {output_sink}")
 
@@ -914,6 +1140,10 @@ if __name__ == "__main__":
     if SPARK_AVAILABLE:
         spark = create_streaming_session()
         query = run_stream_transforms(spark)
-        query.awaitTermination()
+        if isinstance(query, (list, tuple)):
+            for q in query:
+                q.awaitTermination()
+        elif hasattr(query, "awaitTermination"):
+            query.awaitTermination()
     else:
         print("PySpark is not installed; run offline engine or tests.")
