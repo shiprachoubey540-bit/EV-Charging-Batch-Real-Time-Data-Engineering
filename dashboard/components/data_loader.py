@@ -307,3 +307,50 @@ def load_pipeline_audit_reports() -> dict[str, Any]:
 
     return results
 
+@st.cache_data(ttl=5, show_spinner=False)
+def load_streaming_events(limit: int = 50) -> pd.DataFrame:
+    """Load latest real-time/simulated events from PostgreSQL charging_events table."""
+    params = get_postgres_connection_params()
+    if not params:
+        return pd.DataFrame()
+    try:
+        import psycopg2
+        conn = psycopg2.connect(**params, connect_timeout=2)
+        query = f"""
+            SELECT event_id, station_id, session_id, event_type, 
+                   event_timestamp, energy_kwh, incremental_kwh, is_synthetic
+            FROM charging_events 
+            ORDER BY event_timestamp DESC 
+            LIMIT {int(limit)};
+        """
+        df = pd.read_sql(query, conn)
+        conn.close()
+        return df
+    except Exception as exc:
+        logger.debug("Failed to load streaming events: %s", exc)
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=5, show_spinner=False)
+def load_station_window_metrics(limit: int = 50) -> pd.DataFrame:
+    """Load latest station windowed aggregations from PostgreSQL station_window_metrics table."""
+    params = get_postgres_connection_params()
+    if not params:
+        return pd.DataFrame()
+    try:
+        import psycopg2
+        conn = psycopg2.connect(**params, connect_timeout=2)
+        query = f"""
+            SELECT id, station_id, window_start, window_end, 
+                   event_count, total_incremental_kwh, max_cumulative_kwh, is_synthetic
+            FROM station_window_metrics 
+            ORDER BY window_end DESC 
+            LIMIT {int(limit)};
+        """
+        df = pd.read_sql(query, conn)
+        conn.close()
+        return df
+    except Exception as exc:
+        logger.debug("Failed to load window metrics: %s", exc)
+        return pd.DataFrame()
+

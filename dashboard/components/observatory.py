@@ -49,18 +49,42 @@ def check_port_open(host: str, port: int, timeout: float = 1.0) -> bool:
 def get_streaming_system_health() -> dict[str, Any]:
     """Inspect actual connection state to Kafka broker and PostgreSQL streaming table."""
     kafka_online = check_port_open("localhost", 9092)
+    events_count = 0
+    metrics_count = 0
+    try:
+        from dashboard.components.data_loader import get_postgres_connection_params
+        params = get_postgres_connection_params()
+        if params:
+            import psycopg2
+            conn = psycopg2.connect(**params, connect_timeout=2)
+            cur = conn.cursor()
+            cur.execute("SELECT count(*) FROM charging_events;")
+            events_count = cur.fetchone()[0]
+            cur.execute("SELECT count(*) FROM station_window_metrics;")
+            metrics_count = cur.fetchone()[0]
+            cur.close()
+            conn.close()
+    except Exception:
+        pass
+
+    telemetry_state = "LIVE (SIMULATED)" if events_count > 0 else "OFFLINE"
+
     return {
         "kafka_online": kafka_online,
         "topic": "charging-events",
         "consumer_group": "ev-spark-streaming-group",
         "streaming_table": "charging_events",
-        "spark_streaming_active": False,  # True only when active streaming job is registered
+        "spark_streaming_active": events_count > 0,
+        "events_count": events_count,
+        "metrics_count": metrics_count,
+        "telemetry_state": telemetry_state,
     }
 
 
 def render_streaming_observatory_tab() -> None:
     """Render Tab D: Real-Time Streaming Observatory."""
     health = get_streaming_system_health()
+    from dashboard.components.data_loader import load_streaming_events, load_station_window_metrics
 
     st.markdown("### Real-Time Streaming Telemetry & Pipeline Observatory")
     st.caption("Kafka Topic: `charging-events` • Spark Structured Streaming Micro-Batch Architecture")
@@ -75,9 +99,9 @@ def render_streaming_observatory_tab() -> None:
             <div style="font-family: monospace; font-size: 0.88rem; color: {COLOR_TEXT}; display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem;">
                 <span style="color: {COLOR_CYAN}; font-weight: 600;">Simulated Telemetry</span>
                 <span style="color: {COLOR_MUTED};">──▶</span>
-                <span style="color: {COLOR_AMBER}; font-weight: 600;">Apache Kafka (charging-events)</span>
+                <span style="color: {COLOR_AMBER if health['kafka_online'] else COLOR_SLATE}; font-weight: 600;">Apache Kafka (charging-events)</span>
                 <span style="color: {COLOR_MUTED};">──▶</span>
-                <span style="color: {COLOR_EMERALD}; font-weight: 600;">Spark Structured Streaming</span>
+                <span style="color: {COLOR_EMERALD if health['spark_streaming_active'] else COLOR_SLATE}; font-weight: 600;">Spark Structured Streaming</span>
                 <span style="color: {COLOR_MUTED};">──▶</span>
                 <span style="color: #2563EB; font-weight: 600;">PostgreSQL (charging_events)</span>
                 <span style="color: {COLOR_MUTED};">──▶</span>
@@ -99,47 +123,127 @@ def render_streaming_observatory_tab() -> None:
                 <div class="kpi-value" style="color: {COLOR_EMERALD if health['kafka_online'] else COLOR_SLATE}; font-size: 1.15rem;">
                     {'ONLINE' if health['kafka_online'] else 'DISCONNECTED'}
                 </div>
-                <div class="kpi-subtext">{'Active connection' if health['kafka_online'] else 'Broker service not running'}</div>
+                <div class="kpi-subtext">{'Active connection' if health['kafka_online'] else 'Direct-to-DB bypass available'}</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
     with c2:
+        has_metrics = health.get("metrics_count", 0) > 0
         st.markdown(
             f"""
             <div class="kpi-container">
-                <div class="kpi-label">Spark Streaming Engine</div>
-                <div class="kpi-value" style="color: {COLOR_SLATE}; font-size: 1.15rem;">AWAITING</div>
-                <div class="kpi-subtext">Owner: Aleena Antony</div>
+                <div class="kpi-label">Spark Streaming Sink</div>
+                <div class="kpi-value" style="color: {COLOR_EMERALD if has_metrics else COLOR_SLATE}; font-size: 1.15rem;">
+                    {'ACTIVE SINK' if has_metrics else 'AWAITING'}
+                </div>
+                <div class="kpi-subtext">{f'{health.get("metrics_count", 0)} window metrics' if has_metrics else 'Owner: Aleena Antony'}</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
     with c3:
+        has_events = health.get("events_count", 0) > 0
         st.markdown(
             f"""
             <div class="kpi-container">
                 <div class="kpi-label">Kafka Producer Service</div>
-                <div class="kpi-value" style="color: {COLOR_SLATE}; font-size: 1.15rem;">AWAITING</div>
-                <div class="kpi-subtext">Owner: Harikrishnan S.M</div>
+                <div class="kpi-value" style="color: {COLOR_EMERALD if has_events else COLOR_SLATE}; font-size: 1.15rem;">
+                    {'SYNTHETIC GEN' if has_events else 'AWAITING'}
+                </div>
+                <div class="kpi-subtext">{f'{health.get("events_count", 0)} events loaded' if has_events else 'Owner: Harikrishnan S.M'}</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
     with c4:
+        is_live = health.get("events_count", 0) > 0
         st.markdown(
             f"""
             <div class="kpi-container">
                 <div class="kpi-label">Live Telemetry State</div>
-                <div class="kpi-value" style="color: {COLOR_AMBER}; font-size: 1.15rem;">OFFLINE</div>
-                <div class="kpi-subtext">Telemetry unavailable</div>
+                <div class="kpi-value" style="color: {COLOR_EMERALD if is_live else COLOR_AMBER}; font-size: 1.15rem;">
+                    {'ONLINE (SIM)' if is_live else 'OFFLINE'}
+                </div>
+                <div class="kpi-subtext">{f'PostgreSQL table populated' if is_live else 'Telemetry unavailable'}</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
+
+    st.markdown("---")
+
+    # Real-Time Event & Stream Control Panel
+    st.markdown("#### ⚡ Real-Time Stream Ingestion Controller & Monitor")
+    st.caption("Publish simulated real-time charging telemetry directly to the PostgreSQL streaming sink.")
+
+    ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1, 1, 2])
+    with ctrl_col1:
+        sim_batch_size = st.selectbox("Batch Size", [5, 10, 25, 50], index=1)
+    with ctrl_col2:
+        st.write("")
+        if st.button("🚀 Publish Stream Batch", type="primary", use_container_width=True):
+            try:
+                from streaming.simulate_to_postgres import get_conn, insert_events, compute_and_insert_window_metrics
+                conn = get_conn()
+                batch = [generate_event() for _ in range(sim_batch_size)]
+                insert_events(conn, batch)
+                compute_and_insert_window_metrics(conn, batch)
+                conn.close()
+                st.success(f"Published {sim_batch_size} events to charging_events and computed window metrics!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to publish stream batch: {e}")
+
+    with ctrl_col3:
+        st.info("💡 **Academic Note:** All streaming events & window aggregates are simulated (`is_synthetic = TRUE`), adhering to `contracts/data_contracts.yaml`.")
+
+    # Two columns for Streaming Data Tables
+    col_events, col_windows = st.columns([1, 1])
+
+    with col_events:
+        st.markdown("##### 📥 Live Telemetry Events (`charging_events`)")
+        events_df = load_streaming_events(limit=30)
+        if not events_df.empty:
+            st.dataframe(
+                events_df,
+                use_container_width=True,
+                height=320,
+                column_config={
+                    "event_id": st.column_config.TextColumn("Event ID"),
+                    "station_id": st.column_config.TextColumn("Station"),
+                    "event_type": st.column_config.TextColumn("Type"),
+                    "event_timestamp": st.column_config.DatetimeColumn("Timestamp", format="HH:mm:ss"),
+                    "energy_kwh": st.column_config.NumberColumn("Total kWh", format="%.2f"),
+                    "incremental_kwh": st.column_config.NumberColumn("Inc kWh", format="%.2f"),
+                    "is_synthetic": st.column_config.CheckboxColumn("Synthetic"),
+                },
+            )
+        else:
+            st.warning("No streaming events recorded in PostgreSQL table `charging_events` yet.")
+
+    with col_windows:
+        st.markdown("##### ⏱️ 10-Min Tumbling Window Metrics (`station_window_metrics`)")
+        metrics_df = load_station_window_metrics(limit=30)
+        if not metrics_df.empty:
+            st.dataframe(
+                metrics_df,
+                use_container_width=True,
+                height=320,
+                column_config={
+                    "station_id": st.column_config.TextColumn("Station"),
+                    "window_start": st.column_config.DatetimeColumn("Window Start", format="HH:mm:ss"),
+                    "window_end": st.column_config.DatetimeColumn("Window End", format="HH:mm:ss"),
+                    "event_count": st.column_config.NumberColumn("Events"),
+                    "total_incremental_kwh": st.column_config.NumberColumn("Total Inc kWh", format="%.2f"),
+                    "max_cumulative_kwh": st.column_config.NumberColumn("Max kWh", format="%.2f"),
+                },
+            )
+        else:
+            st.warning("No windowed metrics recorded in `station_window_metrics` yet.")
 
     st.markdown("---")
 
@@ -148,10 +252,9 @@ def render_streaming_observatory_tab() -> None:
     with col_info:
         st.markdown("#### 📡 Streaming Integration Specification")
         st.info(
-            "**Integration Status Note:** Real-time ingestion requires two upstream components: "
-            "1) Harikrishnan's Kafka producer (`streaming/producer.py`), and "
-            "2) Aleena's Spark Structured Streaming consumer (`processing/stream_transform.py`). "
-            "Until those microservices are started, this observatory displays the verified event data contract."
+            "**Real-Time Architecture:** Real-time ingestion supports dual ingestion paths: "
+            "1) Harikrishnan's Kafka producer (`streaming/producer.py`) with Aleena's Spark Structured Streaming consumer (`processing/stream_transform.py`), or "
+            "2) In-memory micro-batch engine / direct PostgreSQL relational sink (`streaming/simulate_to_postgres.py`) for reproducible demonstrations."
         )
 
         st.markdown("##### Shared Kafka Event Contract (`data_contracts.yaml`)")
@@ -181,7 +284,7 @@ def render_streaming_observatory_tab() -> None:
             test_count = st.slider("Diagnostic payloads to generate", min_value=1, max_value=10, value=3)
         with ctrl2:
             st.write("")
-            if st.button("Generate Diagnostic Payload", type="primary", use_container_width=True):
+            if st.button("Generate Diagnostic Payload", type="secondary", use_container_width=True):
                 new_evts = [generate_event() for _ in range(test_count)]
                 st.session_state.diagnostic_events = new_evts + st.session_state.diagnostic_events
                 st.session_state.diagnostic_events = st.session_state.diagnostic_events[:30]
