@@ -115,7 +115,7 @@ def test_producer_publish_event_calls_underlying_producer():
     """Verify publish_event serializes and delegates to producer.produce."""
     mock_producer = MagicMock()
     event = {
-        "event_id": "evt-mock-1",
+        "event_id": "evt-87f3a2a0-8471-4568-9928-708c6ec7b42d",
         "station_id": "2-39-81-4550",
         "session_id": "sess-mock-1",
         "event_type": "energy_update",
@@ -130,7 +130,7 @@ def test_producer_publish_event_calls_underlying_producer():
     kwargs = mock_producer.produce.call_args[1]
     assert kwargs["topic"] == "custom-charging-topic"
     assert kwargs["key"] == b"2-39-81-4550"
-    assert b"evt-mock-1" in kwargs["value"]
+    assert b"evt-87f3a2a0-8471-4568-9928-708c6ec7b42d" in kwargs["value"]
     assert mock_producer.poll.called
 
 

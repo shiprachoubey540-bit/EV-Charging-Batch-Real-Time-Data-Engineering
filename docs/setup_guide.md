@@ -24,6 +24,8 @@
 
 ### streaming/ (Harikrishnan SM)
 - Start Kafka locally or via Docker.
+- Install streaming dependencies with `pip install -r streaming/requirements.txt`.
+- The producer samples distinct station IDs from `data/processed/historical_batch/sessions.parquet`. Local tests use the bundled verified-ID fixture at `streaming/testdata/verified_station_ids.csv` if that Parquet file is unavailable.
 - Run: `python -m streaming.producer`
 
 ### processing/ (Aleena Antony)
