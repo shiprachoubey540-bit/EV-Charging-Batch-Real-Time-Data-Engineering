@@ -1,0 +1,8 @@
+# Kafka producer
+confluent-kafka>=2.16.0
+
+# Load local environment variables
+python-dotenv>=1.2.4
+
+# Read verified station IDs from historical sessions Parquet data
+pyarrow>=15.0

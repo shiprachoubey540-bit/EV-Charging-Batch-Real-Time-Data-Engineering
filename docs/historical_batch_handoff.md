@@ -172,7 +172,7 @@ Streaming events published to Kafka topic `charging-events` conform to `contract
 | Event Field | Source in Streaming Simulator | Mapping / Generation Rule | Historical Batch Source |
 | :--- | :--- | :--- | :--- |
 | `event_id` | **Synthetic UUID** | Generated via `f"evt-{uuid.uuid4()}"` per telemetry message | Primary key (unique per message) |
-| `station_id` | **Direct Map** | Sampled from the **55 verified station IDs** in `data/processed/validation/station_summary.csv` | `sessions.station_id` |
+| `station_id` | **Direct Map** | Sampled from the distinct station IDs in `data/processed/historical_batch/sessions.parquet` | `sessions.station_id` |
 | `event_type` | **Lifecycle State** | `session_start` $\to$ `energy_update` (periodic) $\to$ `session_end` | Maps to lifecycle of a charging session |
 | `timestamp` | **Simulation Clock** | Current UTC timestamp formatted as ISO 8601 (`+00:00`) | Maps to `connection_time` / `disconnect_time` |
 | `energy_kwh` | **Cumulative Meter** | Incremental meter readings bounded by max session energy (77.7 kWh) | Maps to `sessions.kwh_delivered` |
@@ -210,4 +210,3 @@ Streaming events published to Kafka topic `charging-events` conform to `contract
 - **Daily Summary:** `data/processed/validation/daily_sessions_summary.csv`
 - **Station Summary:** `data/processed/validation/station_summary.csv`
 - **Energy & Duration Metrics:** `data/processed/validation/energy_and_duration_metrics.json`
-
