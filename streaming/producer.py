@@ -1,4 +1,9 @@
-"""Publish simulated EV charging events to Kafka."""
+"""Publish simulated EV charging events to Kafka.
+
+Owner: Harikrishnan SM
+"""
+
+from __future__ import annotations
 
 import json
 import logging
@@ -41,7 +46,7 @@ _ALLOWED_EVENT_TYPES = {"session_start", "energy_update", "session_end"}
 
 
 class KafkaClient(Protocol):
-    """The Kafka client methods used to enqueue, poll, and flush messages."""
+    """Kafka client methods used to enqueue, poll, and flush messages."""
 
     def produce(self, topic: str, **kwargs: object) -> None: ...
 
@@ -51,13 +56,13 @@ class KafkaClient(Protocol):
 
 
 class KafkaProducer(KafkaClient, Protocol):
-    """A Kafka client that tracks asynchronous delivery failures."""
+    """Kafka client that tracks asynchronous delivery failures."""
 
     delivery_errors: list[str]
 
 
 class KafkaMessage(Protocol):
-    """The delivery metadata used in producer logs."""
+    """Delivery metadata used in producer logs."""
 
     def topic(self) -> str: ...
 
@@ -80,10 +85,7 @@ class TrackedKafkaProducer:
                 raise TypeError("Kafka delivery callback must be callable.")
             original_callback = callback
 
-            def track_delivery(
-                error: object,
-                message: KafkaMessage,
-            ) -> None:
+            def track_delivery(error: object, message: KafkaMessage) -> None:
                 if error is not None:
                     self.delivery_errors.append(str(error))
                 original_callback(error, message)
@@ -98,8 +100,10 @@ class TrackedKafkaProducer:
         return self._producer.flush(timeout)
 
 
-def create_producer() -> TrackedKafkaProducer:
-    """Create a Confluent Kafka producer using environment configuration."""
+def create_producer(
+    config: Mapping[str, object] | None = None,
+) -> TrackedKafkaProducer:
+    """Create a configured Confluent Kafka producer, applying optional overrides."""
     try:
         from confluent_kafka import Producer
     except ImportError as error:
@@ -108,17 +112,20 @@ def create_producer() -> TrackedKafkaProducer:
             "streaming/requirements.txt in the active virtual environment."
         ) from error
 
-    return TrackedKafkaProducer(
-        Producer(
-            {
-                "bootstrap.servers": os.getenv(
-                    "KAFKA_BOOTSTRAP_SERVERS",
-                    KAFKA_BOOTSTRAP_SERVERS,
-                ),
-                "client.id": os.getenv("KAFKA_CLIENT_ID", "ev-charging-producer"),
-            }
-        )
-    )
+    producer_config: dict[str, object] = {
+        "bootstrap.servers": os.getenv(
+            "KAFKA_BOOTSTRAP_SERVERS",
+            KAFKA_BOOTSTRAP_SERVERS,
+        ),
+        "client.id": os.getenv(
+            "KAFKA_CLIENT_ID",
+            "ev-charging-stream-producer",
+        ),
+        "acks": "all",
+    }
+    if config:
+        producer_config.update(config)
+    return TrackedKafkaProducer(Producer(producer_config))
 
 
 def _delivery_report(error: object, message: KafkaMessage) -> None:
@@ -197,10 +204,7 @@ def _validate_event(event: Mapping[str, object]) -> None:
             raise ValueError("incremental_kwh must be a non-negative number.")
     if event_type == "session_start" and (
         energy != 0
-        or (
-            "incremental_kwh" in event
-            and event["incremental_kwh"] != 0
-        )
+        or ("incremental_kwh" in event and event["incremental_kwh"] != 0)
     ):
         raise ValueError("session_start events must have zero energy.")
 
@@ -219,13 +223,13 @@ def publish_event(
     event: Mapping[str, object],
     topic: str | None = None,
 ) -> None:
-    """Validate, JSON-encode, and enqueue one event for Kafka delivery."""
+    """Validate, serialize, and enqueue one event for Kafka delivery."""
     _validate_event(event)
     message_topic = topic or os.getenv("KAFKA_TOPIC_CHARGING_EVENTS", KAFKA_TOPIC)
-    payload = json.dumps(event, allow_nan=False)
+    payload = json.dumps(event, allow_nan=False).encode("utf-8")
     producer.produce(
-        message_topic,
-        key=str(event["session_id"]),
+        topic=message_topic,
+        key=str(event["station_id"]).encode("utf-8"),
         value=payload,
         callback=_delivery_report,
     )

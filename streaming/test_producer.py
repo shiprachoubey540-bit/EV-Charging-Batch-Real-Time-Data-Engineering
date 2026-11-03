@@ -84,6 +84,7 @@ class ProducerTests(unittest.TestCase):
             {
                 "bootstrap.servers": "broker.example:29092",
                 "client.id": "streaming-test",
+                "acks": "all",
             }
         )
 
@@ -97,7 +98,7 @@ class ProducerTests(unittest.TestCase):
 
         topic, message = producer.messages[0]
         self.assertEqual(topic, "test-charging-events")
-        self.assertEqual(message["key"], "test-session")
+        self.assertEqual(message["key"], b"2-39-81-4550")
         self.assertEqual(json.loads(message["value"]), sample_event())
         self.assertTrue(callable(message["callback"]))
         self.assertEqual(producer.poll_timeouts, [0])

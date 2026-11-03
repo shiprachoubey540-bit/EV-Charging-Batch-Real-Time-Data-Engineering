@@ -1,33 +1,31 @@
-"""Generate simulated EV charging events that follow the streaming contract."""
+"""Generate simulated EV charging events from the verified station fleet."""
 
+from __future__ import annotations
+
+import csv
 import logging
 import random
 import time
 import uuid
 from collections.abc import Iterator, Sequence
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _SESSIONS_PARQUET_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "data"
-    / "processed"
-    / "historical_batch"
-    / "sessions.parquet"
+    _PROJECT_ROOT / "data" / "processed" / "historical_batch" / "sessions.parquet"
 )
 _TEST_STATION_IDS_PATH = (
     Path(__file__).resolve().parent / "testdata" / "verified_station_ids.csv"
 )
-
 _default_event_stream: Iterator[dict[str, object]] | None = None
 
 
 def _read_station_ids_csv(path: Path) -> tuple[str, ...]:
     """Read station IDs from the single-column local test fixture."""
-    import csv
-
     with path.open(newline="", encoding="utf-8-sig") as station_file:
         reader = csv.reader(station_file)
         header = next(reader, [])
@@ -55,35 +53,12 @@ def _read_station_ids_from_parquet(path: Path) -> tuple[str, ...]:
     return tuple(dict.fromkeys(station_values))
 
 
-def resolve_station_ids(
-    station_ids: Sequence[str] | None = None,
-    *,
-    local_testing: bool = False,
-) -> tuple[str, ...]:
-    """Resolve explicit IDs or distinct IDs from the historical sessions data."""
-    configured_ids = station_ids
-    if configured_ids is None:
-        try:
-            configured_ids = _read_station_ids_from_parquet(_SESSIONS_PARQUET_PATH)
-        except FileNotFoundError:
-            if not local_testing:
-                raise FileNotFoundError(
-                    "Historical sessions Parquet file not found at "
-                    f"{_SESSIONS_PARQUET_PATH}. Run the historical batch "
-                    "verification first, or enable local testing to use the "
-                    "bundled verified station-ID fixture."
-                ) from None
-            logger.warning(
-                "LOCAL TESTING MODE: historical sessions Parquet is unavailable; "
-                "using the bundled verified station-ID fixture."
-            )
-            configured_ids = _read_station_ids_csv(_TEST_STATION_IDS_PATH)
-
-    if isinstance(configured_ids, str) or not isinstance(configured_ids, Sequence):
+def _validate_station_ids(station_ids: Sequence[str]) -> tuple[str, ...]:
+    if isinstance(station_ids, str) or not isinstance(station_ids, Sequence):
         raise ValueError("station_ids must be a sequence of IDs, not a single string.")
-    if any(not isinstance(station_id, str) for station_id in configured_ids):
+    if any(not isinstance(station_id, str) for station_id in station_ids):
         raise ValueError("Station IDs must be strings.")
-    resolved_ids = tuple(station_id.strip() for station_id in configured_ids)
+    resolved_ids = tuple(station_id.strip() for station_id in station_ids)
     if not resolved_ids or any(not station_id for station_id in resolved_ids):
         raise ValueError("Station IDs must be a non-empty list of non-empty strings.")
     if any(len(station_id) > 20 for station_id in resolved_ids):
@@ -91,6 +66,37 @@ def resolve_station_ids(
     if len(set(resolved_ids)) != len(resolved_ids):
         raise ValueError("Station IDs must not contain duplicates.")
     return resolved_ids
+
+
+@lru_cache(maxsize=1)
+def _load_verified_station_ids(path: Path) -> tuple[str, ...]:
+    return _validate_station_ids(_read_station_ids_from_parquet(path))
+
+
+def resolve_station_ids(
+    station_ids: Sequence[str] | None = None,
+    *,
+    local_testing: bool = False,
+) -> tuple[str, ...]:
+    """Resolve explicit IDs or distinct IDs from the historical sessions data."""
+    if station_ids is not None:
+        return _validate_station_ids(station_ids)
+
+    try:
+        return _load_verified_station_ids(_SESSIONS_PARQUET_PATH)
+    except FileNotFoundError:
+        if not local_testing:
+            raise FileNotFoundError(
+                "Historical sessions Parquet file not found at "
+                f"{_SESSIONS_PARQUET_PATH}. Run the historical batch "
+                "verification first, or enable local testing to use the "
+                "bundled verified station-ID fixture."
+            ) from None
+        logger.warning(
+            "LOCAL TESTING MODE: historical sessions Parquet is unavailable; "
+            "using the bundled verified station-ID fixture."
+        )
+        return _validate_station_ids(_read_station_ids_csv(_TEST_STATION_IDS_PATH))
 
 
 def generate_session_events(
@@ -133,19 +139,80 @@ def generate_session_events(
         )
         cumulative_energy = round(cumulative_energy + incremental_energy, 2)
         event_time = start_time + timedelta(seconds=event_index)
-        event: dict[str, object] = {
+        yield {
             "event_id": str(uuid.uuid4()),
             "station_id": station_id,
             "session_id": active_session_id,
             "event_type": event_type,
             "timestamp": event_time.isoformat(),
             "energy_kwh": cumulative_energy,
+            "incremental_kwh": incremental_energy,
         }
-        if event_type == "session_start":
-            event["incremental_kwh"] = 0.0
-        else:
-            event["incremental_kwh"] = incremental_energy
-        yield event
+
+
+def generate_event(
+    event_id: str | None = None,
+    station_id: str | None = None,
+    session_id: str | None = None,
+    event_type: str | None = None,
+    timestamp: str | None = None,
+    energy_kwh: float | None = None,
+    incremental_kwh: float | None = None,
+    cumulative_kwh: float | None = None,
+) -> dict[str, object]:
+    """Generate one event, honoring the optional arguments supported by main."""
+    if all(
+        value is None
+        for value in (
+            event_id,
+            station_id,
+            session_id,
+            event_type,
+            timestamp,
+            energy_kwh,
+            incremental_kwh,
+            cumulative_kwh,
+        )
+    ):
+        global _default_event_stream
+        if _default_event_stream is None:
+            _default_event_stream = stream_events(interval_seconds=0, local_testing=True)
+        return next(_default_event_stream)
+
+    active_station_id = station_id or random.choice(
+        resolve_station_ids(local_testing=True)
+    )
+    active_event_type = event_type or random.choice(
+        ["session_start", "energy_update", "session_end"]
+    )
+    now_utc = datetime.now(timezone.utc)
+    active_timestamp = timestamp or now_utc.isoformat()
+    active_session_id = session_id or (
+        f"{active_station_id}_{now_utc.strftime('%Y%m%d%H%M%S')}"
+    )
+    if cumulative_kwh is not None and energy_kwh is None:
+        energy_kwh = cumulative_kwh
+    if energy_kwh is None:
+        energy_kwh = (
+            0.0
+            if active_event_type == "session_start"
+            else round(random.uniform(0.1, 75.0), 2)
+        )
+    if incremental_kwh is None:
+        incremental_kwh = (
+            0.0
+            if active_event_type == "session_start"
+            else round(min(energy_kwh, random.uniform(0.0, 5.0)), 2)
+        )
+    return {
+        "event_id": event_id or f"evt-{uuid.uuid4()}",
+        "station_id": active_station_id,
+        "session_id": active_session_id,
+        "event_type": active_event_type,
+        "timestamp": active_timestamp,
+        "energy_kwh": float(energy_kwh),
+        "incremental_kwh": float(incremental_kwh),
+    }
 
 
 def stream_events(
@@ -176,14 +243,6 @@ def stream_events(
                 time.sleep(interval_seconds)
         last_timestamp = datetime.fromisoformat(str(events[-1]["timestamp"]))
         next_start_time = last_timestamp + timedelta(seconds=1)
-
-
-def generate_event() -> dict[str, object]:
-    """Return the next event from a stream using verified station IDs."""
-    global _default_event_stream
-    if _default_event_stream is None:
-        _default_event_stream = stream_events(interval_seconds=0, local_testing=True)
-    return next(_default_event_stream)
 
 
 if __name__ == "__main__":
