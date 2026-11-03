@@ -161,6 +161,50 @@ See [`docs/setup_guide.md`](docs/setup_guide.md) for detailed per-module setup.
 
 ---
 
+## Database (PostgreSQL)
+
+The warehouse is the PostgreSQL database `ev_charging_db`. Scripts are in `database/`.
+Column-level details are in `docs/data_dictionary.md`, the table diagram is in
+`docs/er_diagram.md` and the quality results are in `docs/data_quality_report.md`.
+
+| Table | Contents | Data |
+|-------|----------|------|
+| `dim_station` | The 55 verified Caltech stations | Real |
+| `charging_sessions` | 16,125 historical sessions (Jan 2019 to Sep 2021) | Real |
+| `session_user_inputs` | 16,600 driver preference records | Real |
+| `charging_events` | Stream events written by Spark (`is_synthetic` = TRUE) | Simulated |
+| `station_window_metrics` | 10-minute windowed aggregates per station | Simulated |
+
+### Create and load the database
+
+```bash
+# 1. Create the database and the tables
+psql -U postgres -c "CREATE DATABASE ev_charging_db;"
+psql -U postgres -d ev_charging_db -f database/schema.sql
+
+# 2. Load the historical data (needs sessions.parquet and user_inputs.parquet in
+#    data/processed/historical_batch/ and station_summary.csv in data/processed/validation/)
+python -m database.load_historical
+```
+
+The loader reconciles its totals with the batch report (16,125 sessions, 16,600 user
+inputs, 55 stations, 152,572.77 kWh) and loads nothing if they differ. It is safe to rerun.
+
+### Run the checks and analytics
+
+```bash
+psql -U postgres -d ev_charging_db -f database/quality_checks.sql   # 15 data-quality checks
+psql -U postgres -d ev_charging_db -f database/analytics.sql        # 7 analytical queries
+```
+
+Connection settings use the environment variables `POSTGRES_HOST`, `POSTGRES_PORT`,
+`POSTGRES_DB`, `POSTGRES_USER` and `POSTGRES_PASSWORD`. Never commit the password.
+
+### Limitations
+
+- Real data covers 2019-01-01 to 2021-09-14 only; the Caltech site stopped operating in September 2021.
+- `charging_events` and `station_window_metrics` are simulated and must not be reported as live observations.
+
 ## Data Contracts
 
 Shared field definitions for historical sessions and streaming events are in [`contracts/data_contracts.yaml`](contracts/data_contracts.yaml). All modules must conform to these schemas.
