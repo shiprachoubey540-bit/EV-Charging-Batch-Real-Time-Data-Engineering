@@ -51,10 +51,34 @@ Real data runs from 2019-01-01 to 2021-09-14 only. The Caltech site stopped
 operating in September 2021, so 2022 to 2024 has no sessions. Reports and the
 dashboard must state this limit.
 
-## 6. Streaming tables (simulated)
+## 6. Streaming path (simulated data)
 
-`charging_events` and `station_window_metrics` are simulated and labelled
-`is_synthetic = TRUE`. The streaming checks (duplicate event IDs, unknown stations,
-decreasing energy, non-zero energy at session start, missing synthetic label) ran
-only on 3 test events and returned 0 issues. They must be run again after the
-end-to-end test with the real Kafka and Spark stream.
+`charging_events` and `station_window_metrics` hold simulated data and are labelled
+`is_synthetic = TRUE`.
+
+**End-to-end test (3 November 2026):** Python generator and Kafka producer, Kafka 3.9.0
+(Docker), Spark Structured Streaming (PySpark 4.3.0) and PostgreSQL 13, with the same
+15 quality checks run on the stream output.
+
+| Run | Events written | Events at stations not in dim_station | Result |
+|-----|----------------|---------------------------------------|--------|
+| 1: original generator | 52 | 37 (8 invented station IDs) | Caught by check Q11 |
+| 2: generator using the 55 verified IDs | 98 | 0 | PASS |
+
+Run 2 detail: 21 distinct stations, all among the 55 real stations; 24 session_start,
+51 energy_update and 23 session_end events (one session still open when stopped).
+
+| Streaming check | Run 2 result |
+|-----------------|--------------|
+| Duplicate event IDs | 0 |
+| Event stations not in dim_station | 0 |
+| Energy decreasing within a session | 0 |
+| session_start with non-zero energy | 0 |
+| Events not labelled synthetic | 0 |
+
+**Aggregate consistency (run 1):** for the window 10:00 to 10:10, the raw events table
+and the window table both gave 52 events and 109.63 kWh.
+
+**Timing note:** windows are 10 minutes long with a 10-minute watermark. A window is
+written to `station_window_metrics` only after newer events move the watermark past its
+end, so the most recent windows can be missing while the stream is quiet.
